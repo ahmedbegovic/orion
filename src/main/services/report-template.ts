@@ -61,7 +61,10 @@ const renderInline = (escaped: string, validCitations: ReadonlySet<number>): str
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\*([^*\s][^*]*)\*/g, '<em>$1</em>')
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_m, text: string, url: string) =>
-      keep(`<a href="${url}">${text}</a>`)
+      // target=_blank: in the sandboxed iframe a plain click would navigate
+      // the frame itself (blank white); _blank routes through the window-open
+      // handler, which opens the system browser.
+      keep(`<a href="${url}" target="_blank" rel="noreferrer">${text}</a>`)
     )
     .replace(/\[(\d{1,3})\]/g, (match, n: string) =>
       validCitations.has(Number(n)) ? `<sup><a class="cite" href="#src-${n}">[${n}]</a></sup>` : match
@@ -168,7 +171,7 @@ export function renderReportHtml(report: ResearchReport, meta: ReportMeta): stri
       const label = escapeHtml(src.title?.trim() || src.url)
       const urlLine = href ? `<span class="src-url">${href}</span>` : ''
       return `<li id="src-${src.id}" value="${src.id}">${
-        href ? `<a href="${href}">${label}</a>` : label
+        href ? `<a href="${href}" target="_blank" rel="noreferrer">${label}</a>` : label
       }${urlLine}</li>`
     })
     .join('\n')

@@ -42,12 +42,17 @@ export default function ReportView({ run }: Props) {
   return (
     <div className="flex min-h-0 flex-1">
       <div className="min-w-0 flex-1 p-4">
-        {/* sandbox="" (no allow-scripts): the template is inert HTML with inline CSS only. */}
+        {/* No allow-scripts — the template is inert HTML with inline CSS only.
+            allow-popups lets target=_blank reach the window-open handler,
+            which opens the system browser and denies the in-app popup. The
+            frame matches the template's #101013 and fades in on load so
+            switching to the report never flashes white. */}
         <iframe
-          sandbox=""
+          sandbox="allow-popups"
           srcDoc={report.html}
           title="Research report"
-          className="h-full w-full rounded-lg border border-zinc-800 bg-white"
+          onLoad={(e) => e.currentTarget.classList.remove('opacity-0')}
+          className="h-full w-full rounded-lg border border-zinc-800 bg-[#101013] opacity-0 transition-opacity duration-150"
         />
       </div>
 

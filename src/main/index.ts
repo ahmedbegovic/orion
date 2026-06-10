@@ -81,6 +81,14 @@ async function createWindow(): Promise<void> {
     void shell.openExternal(url)
     return { action: 'deny' }
   })
+  // A sandboxed iframe (the research report) may navigate ITSELF on a plain
+  // link click — never load the web inside the app; hand it to the browser.
+  win.webContents.on('will-frame-navigate', (event) => {
+    if (!event.isMainFrame && /^https?:/i.test(event.url)) {
+      event.preventDefault()
+      void shell.openExternal(event.url)
+    }
+  })
 
   if (process.env.ELECTRON_RENDERER_URL) {
     await win.loadURL(process.env.ELECTRON_RENDERER_URL)
