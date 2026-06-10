@@ -19,6 +19,12 @@ export interface ManagedProcessSpec {
   /** How long to wait for first healthy response after spawn. */
   startTimeoutMs?: number
   healthIntervalMs?: number
+  /**
+   * While true, failed probes still count and broadcast 'unhealthy' but never
+   * escalate to a kill — the engine blocks its event loop (and thus /health)
+   * for the whole of a cold model load, which is work, not a hang.
+   */
+  busy?: () => boolean
 }
 
 const BACKOFF_MS = [1000, 2000, 5000, 15000, 30000]
@@ -33,6 +39,10 @@ export class ManagedProcess {
   private state: ProcessState = 'stopped'
   private detail = ''
   private stopping = false
+  /** Bumped by stop(): a spawn parked in spec.command() must not proceed. */
+  private epoch = 0
+  /** Terminal latch for app quit — once set, nothing may respawn. */
+  private shuttingDown = false
   private crashTimes: number[] = []
   private healthFails = 0
   private healthTimer: ReturnType<typeof setInterval> | null = null
@@ -65,6 +75,7 @@ export class ManagedProcess {
   }
 
   async start(): Promise<void> {
+    if (this.shuttingDown) return
     if (this.state !== 'stopped' && this.state !== 'failed') return
     this.stopping = false
     this.crashTimes = []
@@ -74,14 +85,20 @@ export class ManagedProcess {
 
   private async spawnOnce(): Promise<void> {
     if (this.stopping) return
+    const epoch = ++this.epoch
     this.setState('spawning')
     let plan: SpawnPlan
     try {
       plan = await this.spec.command()
     } catch (err) {
-      this.setState('failed', `could not build command: ${err instanceof Error ? err.message : err}`)
+      if (!this.stopping && epoch === this.epoch) {
+        this.setState('failed', `could not build command: ${err instanceof Error ? err.message : err}`)
+      }
       return
     }
+    // command() yields the event loop — a stop()/restart() may have landed
+    // meanwhile, and its replacement spawn owns the process from here.
+    if (this.stopping || epoch !== this.epoch) return
     this.log.info(`spawn: ${plan.cmd} ${plan.args.join(' ')}`)
     const child = spawn(plan.cmd, plan.args, {
       cwd: plan.cwd,
@@ -96,12 +113,29 @@ export class ManagedProcess {
     child.stderr?.on('data', (b: Buffer) => this.log.warn(b.toString().trimEnd()))
     child.once('error', (err) => {
       this.log.error(`spawn error: ${err.message}`)
+      // A child that never spawned (ENOENT) emits 'error' but never 'exit' —
+      // drive the same failure path so backoff and stop()/restart() still work.
+      if (child.pid === undefined && this.child === child) this.onExit(null, null)
     })
-    child.once('exit', (code, signal) => this.onExit(code, signal))
+    child.once('exit', (code, signal) => {
+      // A superseded child's exit must not clobber the current child's state.
+      if (this.child === child) this.onExit(code, signal)
+    })
 
     this.setState('waiting_healthy')
     const healthy = await this.waitHealthy(child)
-    if (this.stopping || this.child !== child) return
+    if (this.stopping || this.child !== child) {
+      // Superseded while waiting: nothing supervises this child anymore (stop()
+      // only handles the current one) — reap its group so it can't be orphaned.
+      if (this.child !== child && child.pid) {
+        try {
+          process.kill(-child.pid, 'SIGKILL')
+        } catch {
+          // already gone
+        }
+      }
+      return
+    }
     if (healthy) {
       this.restartAttempt = 0
       this.healthFails = 0
@@ -159,7 +193,7 @@ export class ManagedProcess {
       }
       this.healthFails += 1
       if (this.state === 'running') this.setState('unhealthy', `${this.healthFails} failed probes`)
-      if (this.healthFails >= HEALTH_FAILS_BEFORE_RESTART) {
+      if (this.healthFails >= HEALTH_FAILS_BEFORE_RESTART && !this.spec.busy?.()) {
         this.log.warn('health probes exhausted; killing for restart')
         this.healthFails = 0
         this.killTree('SIGKILL') // exit handler drives the restart
@@ -196,6 +230,7 @@ export class ManagedProcess {
 
   async stop(): Promise<void> {
     this.stopping = true
+    this.epoch += 1 // invalidate any spawn still parked in spec.command()
     this.stopHealthLoop()
     if (this.pendingRestart) {
       clearTimeout(this.pendingRestart)
@@ -214,13 +249,30 @@ export class ManagedProcess {
         resolve(true)
       })
     })
-    if (!exited) this.killTree('SIGKILL')
+    if (!exited) {
+      this.killTree('SIGKILL')
+      // SIGKILL on the group cannot be ignored — wait (bounded) for the exit
+      // so onExit reaches 'stopped' before a follow-up start() checks state.
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 2000)
+        child.once('exit', () => {
+          clearTimeout(t)
+          resolve()
+        })
+      })
+    }
   }
 
   async restart(reason: string): Promise<void> {
     this.log.info(`restart requested: ${reason}`)
     await this.stop()
     await this.start()
+  }
+
+  /** Terminal stop for app quit: a restart in flight must not respawn after. */
+  async shutdown(): Promise<void> {
+    this.shuttingDown = true
+    await this.stop()
   }
 }
 
@@ -244,6 +296,6 @@ export class ProcessManager {
   }
 
   async shutdown(): Promise<void> {
-    await Promise.all([...this.procs.values()].map((p) => p.stop()))
+    await Promise.all([...this.procs.values()].map((p) => p.shutdown()))
   }
 }

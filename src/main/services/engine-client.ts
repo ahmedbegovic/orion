@@ -24,10 +24,14 @@ export class EngineClient {
   /**
    * Generation requests in flight through THIS client. Registry-mode
    * /v1/status hides per-request state, and main owns all engine traffic in
-   * M1/M2 — so this counter is the idleness signal restart decisions rely on.
-   * Status/models probes (GETs) don't count.
+   * M1/M2 — so this counter is the idleness signal restart decisions and the
+   * supervisor's busy() hook rely on. Status/models probes (GETs) don't count.
    */
-  private inflight = 0
+  private inflightCount = 0
+
+  get inflight(): number {
+    return this.inflightCount
+  }
 
   constructor(private readonly baseUrl: () => string) {}
 
@@ -37,7 +41,7 @@ export class EngineClient {
     body?: unknown,
     timeoutMs = 10_000
   ): Promise<T> {
-    if (method === 'POST') this.inflight += 1
+    if (method === 'POST') this.inflightCount += 1
     try {
       const res = await fetch(`${this.baseUrl()}${path}`, {
         method,
@@ -51,7 +55,7 @@ export class EngineClient {
       }
       return (await res.json()) as T
     } finally {
-      if (method === 'POST') this.inflight -= 1
+      if (method === 'POST') this.inflightCount -= 1
     }
   }
 
@@ -77,7 +81,7 @@ export class EngineClient {
     const res = await this.request<StatusResponse>('GET', '/v1/status')
     return {
       running: res.status === 'running',
-      numRunning: Math.max(res.num_running ?? 0, this.inflight)
+      numRunning: Math.max(res.num_running ?? 0, this.inflightCount)
     }
   }
 

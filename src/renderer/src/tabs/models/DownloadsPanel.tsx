@@ -1,6 +1,7 @@
 import { X } from 'lucide-react'
 import type { DownloadInfo, ModelsOverview } from '@shared/types'
 import { useModelsStore } from '@/stores/models'
+import { toastError } from '@/stores/toasts'
 import { formatBytes } from '@/lib/format'
 
 /** Keep finished/failed rows visible (dimmed) for a few minutes. */
@@ -54,7 +55,7 @@ export default function DownloadsPanel({ overview }: { overview: ModelsOverview 
               <StatusLabel download={d} />
               {isActive(d) && (
                 <button
-                  onClick={() => void cancelDownload(d.id)}
+                  onClick={() => void cancelDownload(d.id).catch(toastError)}
                   title="Cancel download"
                   className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
                 >

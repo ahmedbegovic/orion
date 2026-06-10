@@ -92,6 +92,8 @@ export class ModelService {
   /** Registry fingerprint the running engine was spawned with. */
   private appliedRegistryKey: string | null = null
   private pendingRegistryRestart = false
+  /** Last unix ms the engine was busy (or had nothing loaded) — idle-unload clock. */
+  private lastBusyAt = Date.now()
   /** downloadId → tools job id, for every download we're actively polling. */
   private readonly activeDownloads = new Map<string, string>()
   private pollTimer: ReturnType<typeof setInterval> | null = null
@@ -139,12 +141,30 @@ export class ModelService {
 
   async refreshInstalled(): Promise<InstalledModel[]> {
     const { models } = await this.deps.tools.localModels()
-    this.installed = models.map((m) => ({
-      repoId: m.repo_id,
-      sizeBytes: m.size_bytes,
-      lastModifiedAt: m.last_modified_ms
-    }))
+    this.installed = models
+      .filter((m) => !this.phantomPartial(m.repo_id))
+      .map((m) => ({
+        repoId: m.repo_id,
+        sizeBytes: m.size_bytes,
+        lastModifiedAt: m.last_modified_ms
+      }))
     return this.installed
+  }
+
+  /**
+   * A cancelled/failed fresh download leaves a partial snapshot the cache scan
+   * cannot tell from a complete repo (hf unlinks its .incomplete temps on a
+   * graceful abort) — but the download history can: rows exist for the repo
+   * and none ever finished. deleteModel purges the repo's rows, so a stale
+   * 'done' from before a delete can't mask a later partial.
+   */
+  private phantomPartial(repoId: string): boolean {
+    const row = this.deps.db
+      .prepare(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(status = 'done'), 0) AS done FROM model_downloads WHERE repo_id = ?"
+      )
+      .get(repoId) as { total: number; done: number } | undefined
+    return !!row && row.total > 0 && row.done === 0
   }
 
   private registryEntries(): EngineConfigModel[] {
@@ -160,9 +180,7 @@ export class ModelService {
     writeEngineConfig({
       port,
       models: entries,
-      budgetGB: this.deps.ramGuard.report(0).budgetGB,
-      kvBits: settings.get<4 | 8 | null>(this.deps.db, 'engine.kvBits', 8),
-      autoUnloadIdleSeconds: settings.get(this.deps.db, 'engine.autoUnloadIdleSeconds', 1800)
+      budgetGB: this.deps.ramGuard.report(0).budgetGB
     })
     return entries
   }
@@ -188,10 +206,22 @@ export class ModelService {
     if (!engine) return
     const state = engine.snapshot().state
 
-    if (state === 'stopped') {
+    // 'failed' is also a start point: a registry change (new download) is the
+    // cue to retry an engine that crash-looped earlier.
+    if (state === 'stopped' || state === 'failed') {
       // The engine never starts with an empty registry — nothing to serve.
       if (entries.length === 0) return
       await engine.start()
+      return
+    }
+
+    // An empty registry can't be respawned (run_engine.py exits 2 on it, and
+    // backoff would crash-loop into 'failed') — stop is the terminal state.
+    if (entries.length === 0) {
+      this.pendingRegistryRestart = false
+      this.appliedRegistryKey = null
+      this.engineModels = []
+      await engine.stop()
       return
     }
 
@@ -227,6 +257,14 @@ export class ModelService {
       const verdict = validateModelRepo(repoId)
       if (!verdict.ok) throw new Error(verdict.warning)
     }
+    // One active download per repo — a second click joins the existing one
+    // instead of racing a duplicate snapshot_download job on the same cache.
+    const existing = this.deps.db
+      .prepare(
+        "SELECT id FROM model_downloads WHERE repo_id = ? AND status IN ('queued', 'downloading') ORDER BY started_at DESC LIMIT 1"
+      )
+      .get(repoId) as { id: string } | undefined
+    if (existing && this.activeDownloads.has(existing.id)) return existing.id
     const { job_id } = await this.deps.tools.downloadModel(repoId)
     const download: DownloadInfo = {
       id: crypto.randomUUID(),
@@ -274,22 +312,37 @@ export class ModelService {
         next = { ...download, status: 'failed', error: 'lost contact with the tools sidecar', finishedAt: Date.now() }
       }
 
-      if (JSON.stringify(next) !== JSON.stringify(download)) {
+      const changed = JSON.stringify(next) !== JSON.stringify(download)
+      if (changed) {
         download = next
+        // DB row first: phantomPartial() judges a repo by its download rows,
+        // so the 'done' row must exist before refreshInstalled() scans.
         this.deps.db
           .prepare(
             'UPDATE model_downloads SET status = ?, bytes_done = ?, bytes_total = ?, error = ?, finished_at = ? WHERE id = ?'
           )
           .run(next.status, next.bytesDone, next.bytesTotal, next.error, next.finishedAt, next.id)
-        this.deps.broadcast({ type: 'models.downloadProgress', download: next })
       }
+
+      // The renderer refetches the whole overview the moment it sees a 'done'
+      // broadcast — installed/registry must already be fresh by then, or it
+      // caches an overview without the finished model and nothing re-pushes it.
+      if (next.status === 'done' && !this.disposed) {
+        try {
+          await this.refreshInstalled()
+          await this.syncEngineRegistry()
+        } catch (err) {
+          // A sidecar blip must not suppress the terminal broadcast.
+          this.log.warn(
+            `refresh after download failed: ${err instanceof Error ? err.message : err}`
+          )
+        }
+      }
+
+      if (changed) this.deps.broadcast({ type: 'models.downloadProgress', download: next })
 
       if (next.status !== 'queued' && next.status !== 'downloading') {
         this.activeDownloads.delete(download.id)
-        if (next.status === 'done' && !this.disposed) {
-          await this.refreshInstalled()
-          await this.syncEngineRegistry()
-        }
         return
       }
     }
@@ -331,6 +384,9 @@ export class ModelService {
     })
     if (!verdict.ok && !force) return { ok: false, reason: verdict.reason }
 
+    // A load counts as activity even before warm()'s POST is in flight, so
+    // the idle-unload timer can't restart the engine out from under it.
+    this.lastBusyAt = Date.now()
     await this.ensureEngineRunning()
     // If a registry change was deferred (engine was busy), the running engine
     // was spawned without this model and warm() would 404. An explicit Load
@@ -352,7 +408,9 @@ export class ModelService {
   async unloadAll(): Promise<void> {
     const engine = this.deps.processManager.get('engine')
     if (!engine || engine.snapshot().state === 'stopped') return
-    await engine.restart('unload all models')
+    // No models installed means the respawn would exit 2 on an empty registry.
+    if (this.installed.length === 0) await engine.stop()
+    else await engine.restart('unload all models')
     this.engineModels = []
   }
 
@@ -380,6 +438,9 @@ export class ModelService {
 
   async deleteModel(repoId: string): Promise<void> {
     await this.deps.tools.deleteModel(repoId)
+    // Reset the repo's download history so phantomPartial() reflects only
+    // attempts made after this delete (see refreshInstalled).
+    this.deps.db.prepare('DELETE FROM model_downloads WHERE repo_id = ?').run(repoId)
     await this.refreshInstalled()
     await this.syncEngineRegistry()
   }
@@ -410,7 +471,10 @@ export class ModelService {
   }
 
   setDefault(feature: Feature, tier: Tier): void {
-    settings.set(this.deps.db, 'featureDefaults', { ...this.featureDefaults(), [feature]: tier })
+    // Persist only explicit overrides — untouched features must keep tracking
+    // FEATURE_DEFAULTS as the code constants evolve.
+    const overrides = settings.get<Partial<FeatureDefaults>>(this.deps.db, 'featureDefaults', {})
+    settings.set(this.deps.db, 'featureDefaults', { ...overrides, [feature]: tier })
   }
 
   private featureDefaults(): FeatureDefaults {
@@ -499,6 +563,28 @@ export class ModelService {
     if (this.pendingRegistryRestart && running && (await this.engineIdle())) {
       this.pendingRegistryRestart = false
       await this.syncEngineRegistry()
+    }
+
+    // Idle auto-unload is main's job: vllm-mlx's --auto-unload-idle-seconds
+    // only works in single-model mode, never in the registry mode we spawn.
+    if (running && this.loadedGB() > 0) {
+      if (await this.engineIdle()) {
+        if (this.disposed) return // the await above can outlive dispose()
+        const idleSeconds = settings.get(this.deps.db, 'engine.autoUnloadIdleSeconds', 1800)
+        if (idleSeconds > 0 && Date.now() - this.lastBusyAt > idleSeconds * 1000) {
+          this.lastBusyAt = Date.now() // one shot per idle stretch
+          await this.unloadAll()
+          this.deps.broadcast({
+            type: 'system.toast',
+            level: 'info',
+            message: `Engine idle for ${Math.round(idleSeconds / 60)} min — models unloaded to reclaim RAM.`
+          })
+        }
+      } else {
+        this.lastBusyAt = Date.now()
+      }
+    } else {
+      this.lastBusyAt = Date.now()
     }
   }
 }

@@ -8,6 +8,7 @@ import type {
   TierCandidateInfo
 } from '@shared/types'
 import { useModelsStore } from '@/stores/models'
+import { pushToast, toastError } from '@/stores/toasts'
 import ConfirmDialog from '@/components/ConfirmDialog'
 
 const TIER_LABELS: Record<Tier, string> = {
@@ -103,9 +104,16 @@ export default function TierTable({ overview }: { overview: ModelsOverview }) {
       (d) => d.repoId === repoId && (d.status === 'queued' || d.status === 'downloading')
     )
 
-  const onLoad = async (repoId: string): Promise<void> => {
-    const result = await load(repoId)
-    if (!result.ok) setGuard({ repoId, reason: result.reason ?? 'The RAM guard blocked this load.' })
+  const onLoad = async (repoId: string, force = false): Promise<void> => {
+    try {
+      const result = await load(repoId, force)
+      if (result.ok) return
+      // Only a genuine RAM-guard refusal offers "Load anyway"; other failures must not.
+      if (force) pushToast('error', result.reason ?? 'Load failed.')
+      else setGuard({ repoId, reason: result.reason ?? 'The RAM guard blocked this load.' })
+    } catch (err) {
+      toastError(err)
+    }
   }
 
   return (
@@ -146,7 +154,7 @@ export default function TierTable({ overview }: { overview: ModelsOverview }) {
                     engineState={liveState(candidate.repoId, candidate.engineState)}
                     download={activeDownload(candidate.repoId)}
                     onLoad={(repoId) => void onLoad(repoId)}
-                    onDownload={(repoId) => void download(repoId)}
+                    onDownload={(repoId) => void download(repoId).catch(toastError)}
                   />
                 ))}
               </div>
@@ -161,7 +169,7 @@ export default function TierTable({ overview }: { overview: ModelsOverview }) {
         confirmLabel="Load anyway"
         danger
         onConfirm={() => {
-          if (guard) void load(guard.repoId, true)
+          if (guard) void onLoad(guard.repoId, true)
           setGuard(null)
         }}
         onCancel={() => setGuard(null)}

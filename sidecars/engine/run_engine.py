@@ -79,12 +79,13 @@ def build_argv(config_path: Path) -> list[str]:
         # Weights come from the shared HF cache; downloads are the tools sidecar's job.
         "--offline",
     ]
-    kv_bits = config.get("kv_cache_quantization_bits")
-    if kv_bits is not None:
-        argv += ["--kv-cache-quantization", "--kv-cache-quantization-bits", str(int(kv_bits))]
-    idle_seconds = config.get("auto_unload_idle_seconds") or 0
-    if idle_seconds > 0:
-        argv += ["--auto-unload-idle-seconds", str(idle_seconds)]
+    # Deliberately simple mode, no KV-cache quantization: the KV-quant flags
+    # only take effect under --continuous-batching, and vllm-mlx 0.3.0's
+    # batched path cannot generate with gemma-4 models at all
+    # (patch_gemma4_attention_for_batching rejects the shared_kv kwarg).
+    # Revisit both together when upstream fixes batched gemma-4.
+    # No --auto-unload-idle-seconds either: it is inert in registry mode (only
+    # wired up for single-model serve). Electron main owns the idle-unload timer.
     return argv
 
 

@@ -12,10 +12,6 @@ export interface EngineConfigOptions {
   port: number
   models: EngineConfigModel[]
   budgetGB: number
-  /** null = no KV cache quantization flags. */
-  kvBits: 4 | 8 | null
-  /** 0 disables idle auto-unload. */
-  autoUnloadIdleSeconds: number
 }
 
 export function engineConfigPath(): string {
@@ -32,8 +28,6 @@ export function writeEngineConfig(opts: EngineConfigOptions): string {
     port: opts.port,
     memory_budget_gb: opts.budgetGB,
     contention: { strategy: 'wait_then_fail', wait_timeout_s: 180 },
-    kv_cache_quantization_bits: opts.kvBits,
-    auto_unload_idle_seconds: opts.autoUnloadIdleSeconds,
     models: opts.models.map((m) => ({
       name: m.name,
       source: m.source,

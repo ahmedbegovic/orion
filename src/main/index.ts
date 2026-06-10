@@ -122,7 +122,7 @@ app.whenReady().then(async () => {
     getEnginePort: () => ports.engine,
     broadcast
   })
-  registerModelsFeature({ processManager, modelService, ports })
+  registerModelsFeature({ processManager, modelService, engineClient, ports })
 
   attachRouter()
 

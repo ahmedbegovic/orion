@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Trash2 } from 'lucide-react'
 import type { InstalledModel, ModelsOverview } from '@shared/types'
 import { useModelsStore } from '@/stores/models'
+import { toastError } from '@/stores/toasts'
 import { formatBytes } from '@/lib/format'
 import ConfirmDialog from '@/components/ConfirmDialog'
 
@@ -54,7 +55,7 @@ export default function LocalModels({ overview }: { overview: ModelsOverview }) 
           </span>
           {anyLoaded && (
             <button
-              onClick={() => void unloadAll()}
+              onClick={() => void unloadAll().catch(toastError)}
               className="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
             >
               Unload all
@@ -71,7 +72,8 @@ export default function LocalModels({ overview }: { overview: ModelsOverview }) 
         confirmLabel="Delete"
         danger
         onConfirm={() => {
-          if (pendingDelete) void deleteModel(pendingDelete.repoId)
+          // Surfaces the sidecar's 409 when the repo is still downloading ("cancel it first").
+          if (pendingDelete) void deleteModel(pendingDelete.repoId).catch(toastError)
           setPendingDelete(null)
         }}
         onCancel={() => setPendingDelete(null)}

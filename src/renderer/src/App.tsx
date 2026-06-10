@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { useSystemStore } from './stores/system'
 import StatusBar from './components/StatusBar'
+import Toasts from './components/Toasts'
 import ChatTab from './tabs/chat/ChatTab'
 import AgentTab from './tabs/agent/AgentTab'
 import CodeTab from './tabs/code/CodeTab'
@@ -81,6 +82,7 @@ export default function App() {
         </main>
       </div>
       <StatusBar />
+      <Toasts />
     </div>
   )
 }

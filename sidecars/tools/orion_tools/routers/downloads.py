@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from huggingface_hub import (
+    CachedRepoInfo,
     CacheNotFound,
     HfApi,
     scan_cache_dir,
@@ -78,6 +79,9 @@ def _job_tqdm(job: Job) -> type[base_tqdm]:
 def _run_download(job: Job, repo_id: str) -> Optional[dict[str, Any]]:
     # Total size up-front from file metadata; None-safe (sizes can be missing).
     info = HfApi().model_info(repo_id, files_metadata=True)
+    # _snapshot_complete needs the target revision to tell this download's
+    # snapshot apart from previously completed ones.
+    job.data["revision"] = info.sha
     siblings = [s for s in (info.siblings or []) if s.size is not None]
     total = sum(s.size for s in siblings) if siblings else None
     job.data["bytes_total"] = total
@@ -113,6 +117,25 @@ def start_download(body: DownloadRequest) -> dict[str, str]:
     return {"job_id": job.id}
 
 
+def _snapshot_complete(repo: CachedRepoInfo) -> bool:
+    """True when `repo` has at least one fully-downloaded snapshot.
+
+    snapshot_download creates snapshots/<rev> up front and symlinks each file
+    as it lands, so scan_cache_dir lists mid-download and interrupted repos
+    with a partial size_on_disk — reporting those as installed would feed
+    phantom models (with wrong memory estimates) to the UI and engine registry.
+    """
+    job = registry.find_running("model-download", repo_id=repo.repo_id)
+    if job is not None:
+        # Mid-download: only revisions other than the one being fetched can be
+        # complete (a new-revision update of an installed model still counts).
+        return any(rev.commit_hash != job.data.get("revision") for rev in repo.revisions)
+    # No live job: leftover *.incomplete temp blobs mean a download died
+    # mid-file (process killed). A cancelled/failed download unlinks its temps
+    # on the way out, so this is a heuristic, not a full validation.
+    return not any((repo.repo_path / "blobs").glob("*.incomplete"))
+
+
 @router.get("/local")
 def local_models() -> dict[str, list[dict[str, Any]]]:
     try:
@@ -126,7 +149,7 @@ def local_models() -> dict[str, list[dict[str, Any]]]:
             "last_modified_ms": int(repo.last_modified * 1000) if repo.last_modified else None,
         }
         for repo in cache.repos
-        if repo.repo_type == "model"
+        if repo.repo_type == "model" and _snapshot_complete(repo)
     ]
     models.sort(key=lambda m: m["repo_id"])
     return {"models": models}

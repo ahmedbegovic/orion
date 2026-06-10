@@ -4,22 +4,27 @@ import { engineConfigPath } from '../services/engine-config'
 import { handle } from '../ipc/router'
 import type { ProcessManager } from '../services/process-manager'
 import type { ModelService } from '../services/model-service'
+import type { EngineClient } from '../services/engine-client'
 
 export interface ModelsFeatureDeps {
   processManager: ProcessManager
   modelService: ModelService
+  engineClient: EngineClient
   ports: { engine: number }
 }
 
 /** Registers the engine sidecar and every models.* IPC method. */
 export function registerModelsFeature(deps: ModelsFeatureDeps): void {
-  const { processManager, modelService, ports } = deps
+  const { processManager, modelService, engineClient, ports } = deps
 
   processManager.register({
     name: 'engine',
     port: () => ports.engine || null,
     healthUrl: () => `http://127.0.0.1:${ports.engine}/health`,
     startTimeoutMs: 180_000, // first uv run may resolve the venv
+    // Cold model loads block the engine's event loop, so /health stalls for
+    // their whole duration — a request in flight means work, not a hang.
+    busy: () => engineClient.inflight > 0,
     command: async () => {
       ports.engine = await allocatePort(47621)
       // The config is the spawn contract — rewrite it with the fresh port.

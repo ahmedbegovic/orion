@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Loader2, Search } from 'lucide-react'
 import type { HFSearchResult } from '@shared/types'
 import { useModelsStore } from '@/stores/models'
+import { toastError } from '@/stores/toasts'
 import { relativeTime } from '@/lib/format'
 import ConfirmDialog from '@/components/ConfirmDialog'
 
@@ -28,7 +29,7 @@ export default function HFSearch() {
   const run = (q: string): void => {
     if (debounce.current) clearTimeout(debounce.current)
     debounce.current = null
-    if (q.trim()) void search(q.trim())
+    if (q.trim()) void search(q.trim()).catch(toastError)
   }
 
   return (
@@ -83,7 +84,7 @@ export default function HFSearch() {
                   onClick={() =>
                     result.warning !== null
                       ? setForceTarget(result)
-                      : void download(result.repoId)
+                      : void download(result.repoId).catch(toastError)
                   }
                   className="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
                 >
@@ -107,7 +108,7 @@ export default function HFSearch() {
         confirmLabel="Download anyway"
         danger
         onConfirm={() => {
-          if (forceTarget) void download(forceTarget.repoId, true)
+          if (forceTarget) void download(forceTarget.repoId, true).catch(toastError)
           setForceTarget(null)
         }}
         onCancel={() => setForceTarget(null)}

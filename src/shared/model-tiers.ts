@@ -9,8 +9,6 @@ export interface TierSpec {
   /** Approximate weights footprint on disk / in memory at 4-bit, GB. */
   approxGB: number
   defaultCtx: number
-  /** Force KV cache quantization to this many bits (undefined = engine default). */
-  kvBits?: number
   /** If true this model may never share RAM with the utility model. */
   noCoload?: boolean
 }
@@ -52,11 +50,13 @@ export const TIERS: Record<Tier, TierSpec> = {
     defaultCtx: 32768
   },
   ultra: {
+    // KV stays fp16: vllm-mlx only quantizes KV under continuous batching,
+    // which cannot generate with gemma-4 — so the 32k ctx cap and noCoload
+    // are what keep this one inside the budget.
     candidates: ['mlx-community/Qwen3.6-27B-4bit'],
     caps: ['text', 'vision', 'video'],
     approxGB: 16.5,
     defaultCtx: 32768,
-    kvBits: 4,
     noCoload: true
   }
 }

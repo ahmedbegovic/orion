@@ -24,6 +24,10 @@ function upsertDownload(downloads: DownloadInfo[], download: DownloadInfo): Down
   return downloads.map((d, i) => (i === index ? download : d))
 }
 
+// HF search latency is variable enough that responses resolve out of order;
+// only the newest request may write results or clear the spinner.
+let searchSeq = 0
+
 export const useModelsStore = create<ModelsStore>((set, get) => ({
   overview: null,
   searchResults: null,
@@ -77,12 +81,13 @@ export const useModelsStore = create<ModelsStore>((set, get) => ({
   },
 
   search: async (query) => {
+    const seq = ++searchSeq
     set({ searching: true })
     try {
       const { results } = await call('models.search', { query })
-      set({ searchResults: results })
+      if (seq === searchSeq) set({ searchResults: results })
     } finally {
-      set({ searching: false })
+      if (seq === searchSeq) set({ searching: false })
     }
   },
 
