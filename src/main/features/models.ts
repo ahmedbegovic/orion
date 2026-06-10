@@ -1,3 +1,4 @@
+import { app } from 'electron'
 import { allocatePort } from '../services/ports'
 import { sidecarDir, uvBinary, uvEnvFor } from '../services/paths'
 import { engineConfigPath } from '../services/engine-config'
@@ -21,7 +22,8 @@ export function registerModelsFeature(deps: ModelsFeatureDeps): void {
     name: 'engine',
     port: () => ports.engine || null,
     healthUrl: () => `http://127.0.0.1:${ports.engine}/health`,
-    startTimeoutMs: 180_000, // first uv run may resolve the venv
+    // Packaged first run uv-syncs the venv (mlx wheels are large).
+    startTimeoutMs: app.isPackaged ? 900_000 : 180_000,
     // A request in flight through main's client (generation, or a blocking
     // /load via warm()) means work, not a hang — never escalate failed
     // probes to a kill mid-generation.

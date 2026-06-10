@@ -1,16 +1,40 @@
-# Packaging config — fully exercised in M6; kept minimal until then.
 appId: dev.ahmed.orion
 productName: Orion
 directories:
   output: dist
-  buildResources: resources
+  buildResources: build
 files:
   - out/**
   - package.json
+  # Production node_modules are collected automatically from the dependency
+  # graph (computeNodeModuleFileSets); only negative !node_modules/... patterns
+  # here would affect them — a positive node_modules/** entry is a no-op.
+asarUnpack:
+  # Native module and executable binaries cannot run from inside app.asar.
+  - node_modules/node-pty/**
+  - node_modules/opencode-ai/**
+  - node_modules/opencode-darwin-arm64/**
+extraResources:
+  # Sidecar sources; venvs are created in userData by uv on first run.
+  - from: sidecars
+    to: sidecars
+    filter:
+      - '**/*'
+      - '!**/.venv/**'
+      - '!**/__pycache__/**'
+      - '!**/*.pyc'
+  # MCP shim, esbuild-bundled self-contained by predist, lands at the
+  # Resources root (resourcesDir()) — the unbundled resources/ copy resolves
+  # its bare imports against the repo node_modules, which a packaged app
+  # has nowhere near the Resources root (app.asar is never consulted).
+  - from: build/mcp
+    to: .
+  # Pinned uv copied by the predist script (uvBinary() → Resources/bin/uv).
+  - from: build/uv
+    to: bin/uv
 mac:
   target:
     - target: dmg
       arch: [arm64]
   category: public.app-category.developer-tools
 npmRebuild: true
-# M6: extraResources will ship sidecars/ (source + uv.lock), bin/uv, and scripts/.

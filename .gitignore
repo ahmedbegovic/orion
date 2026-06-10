@@ -19,3 +19,4 @@ bin/uv
 .idea/
 .vscode/
 .claude/
+build/

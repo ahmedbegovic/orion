@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import type { InstalledModel } from '@shared/types'
 import { TIERS, TIER_ORDER, modelDisplayName, type TierSpec } from '@shared/model-tiers'
 import { engineModelId } from './engine-client'
-import { dataDir, resourcesDir } from './paths'
+import { dataDir, nodeRunner, resourcesDir } from './paths'
 
 export interface OpencodeConfigOptions {
   enginePort: number
@@ -73,8 +73,13 @@ export function writeOpencodeConfig(opts: OpencodeConfigOptions): string {
       // format the engine's gemma parser cannot parse (verified live).
       orion_web: {
         type: 'local',
-        command: ['node', join(resourcesDir(), 'orion-web-mcp.mjs')],
-        environment: { ORION_TOOLS_URL: `http://127.0.0.1:${opts.toolsPort}` },
+        // Packaged: the app's own Electron binary in Node mode — users cannot
+        // be assumed to have node on PATH.
+        command: [nodeRunner().command, join(resourcesDir(), 'orion-web-mcp.mjs')],
+        environment: {
+          ORION_TOOLS_URL: `http://127.0.0.1:${opts.toolsPort}`,
+          ...nodeRunner().env
+        },
         enabled: true
       }
     },

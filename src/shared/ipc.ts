@@ -306,6 +306,27 @@ export const researchSourceSchema = z.object({
   cited: z.boolean()
 })
 
+export const newsSourceSchema = z.object({
+  id: z.string(),
+  url: z.string(),
+  title: z.string().nullable(),
+  enabled: z.boolean(),
+  lastFetchedAt: z.number().nullable()
+})
+
+export const newsItemSchema = z.object({
+  id: z.string(),
+  sourceId: z.string(),
+  sourceTitle: z.string().nullable(),
+  url: z.string().nullable(),
+  title: z.string().nullable(),
+  publishedAt: z.number().nullable(),
+  summary: z.string().nullable(),
+  status: z.enum(['new', 'extracting', 'pending_summary', 'summarized', 'failed']),
+  readAt: z.number().nullable(),
+  createdAt: z.number()
+})
+
 // ---------------------------------------------------------------------------
 // Method contract: renderer -> main request/response over `orion:call`.
 // Every method is zod-validated on both sides of the bridge.
@@ -677,6 +698,43 @@ export const contract = {
     output: z.object({ path: z.string().nullable() })
   },
 
+  // --- news ------------------------------------------------------------------------
+  'news.sources': {
+    input: z.undefined(),
+    output: z.object({ sources: z.array(newsSourceSchema) })
+  },
+  'news.addSource': {
+    input: z.object({ url: z.string() }),
+    output: z.object({ source: newsSourceSchema })
+  },
+  'news.updateSource': {
+    input: z.object({ id: z.string(), enabled: z.boolean() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'news.removeSource': {
+    input: z.object({ id: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'news.items': {
+    /** Unread first, newest first; paused = summaries waiting on the ultra model. */
+    input: z.object({ limit: z.number().optional() }).optional(),
+    output: z.object({ items: z.array(newsItemSchema), paused: z.boolean() })
+  },
+  'news.read': {
+    /** Full extracted article body for the reader view; marks the item read. */
+    input: z.object({ itemId: z.string() }),
+    output: z.object({ markdown: z.string().nullable() })
+  },
+  'news.markAllRead': {
+    input: z.undefined(),
+    output: z.object({ ok: z.boolean() })
+  },
+  'news.refresh': {
+    /** Manual fetch cycle across all enabled sources; returns immediately. */
+    input: z.undefined(),
+    output: z.object({ ok: z.boolean() })
+  },
+
   // --- terminal (node-pty) -------------------------------------------------------------
   'term.create': {
     /** Login shell with cwd inside the workspace; output streams via term.data. */
@@ -800,6 +858,10 @@ export const orionEventSchema = z.discriminatedUnion('type', [
     type: z.literal('research.step'),
     runId: z.string(),
     step: researchStepSchema
+  }),
+  z.object({
+    /** Items/sources changed (fetch cycle, summaries, reads) — refetch. */
+    type: z.literal('news.updated')
   }),
   z.object({
     type: z.literal('research.status'),

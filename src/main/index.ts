@@ -1,4 +1,6 @@
 import { app, BrowserWindow, shell } from 'electron'
+import { execSync } from 'node:child_process'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { initLogging, log } from './services/logger'
 import { openDatabase, type OrionDatabase } from './services/db'
@@ -8,11 +10,19 @@ import { ToolsClient } from './services/tools-client'
 import { EngineClient } from './services/engine-client'
 import { RamGuard } from './services/ram-guard'
 import { ModelService } from './services/model-service'
-import { dataDir, sidecarDir, uvBinary, uvEnvFor } from './services/paths'
+import {
+  dataDir,
+  opencodeBinary,
+  resourcesRoot,
+  sidecarDir,
+  uvBinary,
+  uvEnvFor
+} from './services/paths'
 import { ChatRepo } from './services/chat/repo'
 import { ChatOrchestrator } from './services/chat/orchestrator'
 import { LibraryService } from './services/library-service'
 import { ResearchOrchestrator } from './services/research-orchestrator'
+import { NewsScheduler } from './services/news-scheduler'
 import { McpManager } from './services/mcp-manager'
 import { SkillsService } from './services/skills'
 import { OpencodePool } from './services/opencode-pool'
@@ -27,6 +37,7 @@ import { registerSkillsFeature } from './features/skills'
 import { registerAgentFeature } from './features/agent'
 import { registerCodeFeature } from './features/code'
 import { registerResearchFeature } from './features/research'
+import { registerNewsFeature } from './features/news'
 import { attachRouter, handle } from './ipc/router'
 import { broadcast } from './ipc/events'
 
@@ -42,14 +53,73 @@ let modelService: ModelService | null = null
 let orchestrator: ChatOrchestrator | null = null
 let libraryService: LibraryService | null = null
 let researchOrchestrator: ResearchOrchestrator | null = null
+let newsScheduler: NewsScheduler | null = null
 let mcpManager: McpManager | null = null
 let opencodePool: OpencodePool | null = null
 let workspaceFs: WorkspaceFs | null = null
 let termService: TermService | null = null
 
-const processManager = new ProcessManager((snapshot) =>
+// Live child pids persisted to runtime.json so a crashed app's orphans can be
+// swept at the next boot (a clean quit kills the process groups itself).
+const livePids = new Map<string, number>()
+const runtimePath = (): string => join(dataDir(), 'runtime.json')
+function persistRuntime(): void {
+  try {
+    writeFileSync(runtimePath(), JSON.stringify({ pids: Object.fromEntries(livePids) }) + '\n')
+  } catch {
+    // best-effort — never let bookkeeping break supervision
+  }
+}
+
+function sweepStaleProcesses(): void {
+  try {
+    const saved = JSON.parse(readFileSync(runtimePath(), 'utf8')) as {
+      pids?: Record<string, number>
+    }
+    // Pids get recycled — only kill ones whose command is something the
+    // supervisor itself spawns. Substring matches (e.g. /orion/i) would hit
+    // our own Electron helpers and, in dev, anything with the repo path in argv.
+    const ours = [
+      `${uvBinary()} run --project ${join(resourcesRoot(), 'sidecars')}`, // tools/engine wrappers
+      opencodeBinary() // opencode servers (absolute path in both modes)
+    ]
+    for (const [name, pid] of Object.entries(saved.pids ?? {})) {
+      try {
+        const cmd = execSync(`ps -p ${pid} -o command=`, { encoding: 'utf8' }).trim()
+        if (!ours.some((prefix) => cmd.startsWith(prefix))) continue
+        // Every supervised child leads its own group (detached spawn) — if the
+        // group kill misses, the pid was never ours; no kill(pid) fallback.
+        process.kill(-pid, 'SIGKILL')
+        log.warn(`swept stale ${name} process (pid ${pid}) from a previous run`)
+      } catch {
+        // not running anymore
+      }
+    }
+  } catch {
+    // no runtime file yet
+  }
+  persistRuntime()
+}
+
+const processManager = new ProcessManager((snapshot) => {
+  // Track every live child, whatever its state — pid is non-null exactly while
+  // one is alive (onExit nulls it first). Keying on 'running' would drop the
+  // long packaged-first-run uv sync and the engine's 'unhealthy' cold loads
+  // from runtime.json, leaving unsweepable orphans after a crash there.
+  if (snapshot.pid !== null) {
+    livePids.set(snapshot.name, snapshot.pid)
+  } else {
+    livePids.delete(snapshot.name)
+  }
+  persistRuntime()
   broadcast({ type: 'system.processState', process: snapshot })
-)
+  // The exact event the news drain's waitForTools polls for — its ~30s budget
+  // loses to the packaged first boot (uv sync, up to 600s); the kick is
+  // idempotent (single-flight guards + conditional GETs) and covers restarts.
+  if (snapshot.name === 'tools' && snapshot.state === 'running') {
+    void newsScheduler?.refresh()
+  }
+})
 
 const ports = { tools: 0, engine: 0 }
 
@@ -127,7 +197,8 @@ function registerSidecars(): void {
     name: 'tools',
     port: () => ports.tools || null,
     healthUrl: () => `http://127.0.0.1:${ports.tools}/healthz`,
-    startTimeoutMs: 60_000, // first uv run may resolve the venv
+    // Packaged first run uv-syncs the venv (and may download a Python).
+    startTimeoutMs: app.isPackaged ? 600_000 : 60_000,
     command: async () => {
       ports.tools = await allocatePort(47622)
       const dir = sidecarDir('tools')
@@ -147,6 +218,7 @@ app.whenReady().then(async () => {
 
   db = openDatabase(join(dataDir(), 'orion.db'))
 
+  sweepStaleProcesses()
   registerSidecars()
   registerIpcHandlers()
 
@@ -201,6 +273,15 @@ app.whenReady().then(async () => {
   })
   registerResearchFeature(researchOrchestrator)
 
+  newsScheduler = new NewsScheduler({
+    db,
+    tools: toolsClient,
+    engine: engineClient,
+    modelService,
+    broadcast
+  })
+  registerNewsFeature(newsScheduler)
+
   opencodePool = new OpencodePool({
     processManager,
     getEnginePort: () => ports.engine,
@@ -222,6 +303,7 @@ app.whenReady().then(async () => {
   void processManager.get('tools')?.start()
   void modelService.init()
   researchOrchestrator.init()
+  newsScheduler.init()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow()
@@ -244,11 +326,12 @@ app.on('before-quit', (event) => {
       termService?.dispose()
       await workspaceFs?.dispose()
       modelService?.dispose()
-      // Chat/research/library/MCP teardown must precede the sidecar shutdown:
-      // abort in-flight generations and stop ingest pollers before their
-      // servers die.
+      // Chat/research/news/library/MCP teardown must precede the sidecar
+      // shutdown: abort in-flight generations and stop ingest pollers before
+      // their servers die.
       orchestrator?.dispose()
       researchOrchestrator?.dispose()
+      newsScheduler?.dispose()
       libraryService?.dispose()
       await mcpManager?.dispose()
       // The pool's idle timer and opencode servers must stop before the

@@ -320,3 +320,27 @@ export interface ResearchSource {
   fetched: boolean
   cited: boolean
 }
+
+export interface NewsSource {
+  id: string
+  url: string
+  title: string | null
+  enabled: boolean
+  lastFetchedAt: number | null
+}
+
+export type NewsItemStatus = 'new' | 'extracting' | 'pending_summary' | 'summarized' | 'failed'
+
+/** List-shaped item — the extracted article body is fetched per-item. */
+export interface NewsItem {
+  id: string
+  sourceId: string
+  sourceTitle: string | null
+  url: string | null
+  title: string | null
+  publishedAt: number | null
+  summary: string | null
+  status: NewsItemStatus
+  readAt: number | null
+  createdAt: number
+}

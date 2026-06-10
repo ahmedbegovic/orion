@@ -30,7 +30,36 @@ export function uvBinary(): string {
 export function uvEnvFor(name: 'engine' | 'tools'): Record<string, string> {
   if (!app.isPackaged) return {}
   return {
+    // Use the shipped lockfile verbatim — an implicit re-lock would write
+    // uv.lock into the signed (possibly read-only) bundle. predist runs
+    // `uv lock --check`, so staleness fails at dist time, not on user machines.
+    UV_FROZEN: '1',
     UV_PROJECT_ENVIRONMENT: join(dataDir(), 'venvs', name),
-    UV_PYTHON_INSTALL_DIR: join(dataDir(), 'uv', 'python')
+    UV_PYTHON_INSTALL_DIR: join(dataDir(), 'uv', 'python'),
+    // The sidecar sources run straight from Resources/ — keep CPython from
+    // writing __pycache__ into the bundle (same seal-breaking problem).
+    PYTHONDONTWRITEBYTECODE: '1'
   }
+}
+
+/**
+ * The real opencode executable (the .bin symlink does not survive packing,
+ * and binaries cannot execute from inside app.asar — it ships unpacked).
+ */
+export function opencodeBinary(): string {
+  const rel = join('node_modules', 'opencode-darwin-arm64', 'bin', 'opencode')
+  return app.isPackaged
+    ? join(process.resourcesPath, 'app.asar.unpacked', rel)
+    : join(app.getAppPath(), rel)
+}
+
+/**
+ * How to run a bundled Node script (the orion-web MCP shim): dev relies on
+ * PATH, the packaged app reuses its own Electron binary in Node mode — users
+ * cannot be assumed to have node installed.
+ */
+export function nodeRunner(): { command: string; env: Record<string, string> } {
+  return app.isPackaged
+    ? { command: process.execPath, env: { ELECTRON_RUN_AS_NODE: '1' } }
+    : { command: 'node', env: {} }
 }

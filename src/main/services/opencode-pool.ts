@@ -5,7 +5,7 @@ import type { InstalledModel } from '@shared/types'
 import type { ManagedProcess, ProcessManager } from './process-manager'
 import { allocatePort } from './ports'
 import { opencodeConfigKey, writeOpencodeConfig } from './opencode-config'
-import { resourcesRoot } from './paths'
+import { opencodeBinary } from './paths'
 import { scopedLogger } from './logger'
 
 const MAX_SERVERS = 2
@@ -175,7 +175,7 @@ export class OpencodePool {
         server.configKey = opencodeConfigKey(configOpts)
         const configPath = writeOpencodeConfig(configOpts)
         return {
-          cmd: join(resourcesRoot(), 'node_modules', '.bin', 'opencode'),
+          cmd: opencodeBinary(),
           args: ['serve', '--port', String(server.port), '--hostname', '127.0.0.1'],
           cwd: server.directory,
           env: { OPENCODE_CONFIG: configPath }

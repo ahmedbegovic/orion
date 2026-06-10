@@ -52,6 +52,23 @@ export interface VisitResult {
   url: string
 }
 
+export interface NewsFeedEntry {
+  guid: string
+  title: string | null
+  link: string | null
+  published_ms: number | null
+  summary: string | null
+}
+
+export interface NewsFetchResult {
+  not_modified: boolean
+  /** Echoed back on 304; the response headers' values otherwise. */
+  etag: string | null
+  last_modified: string | null
+  feed_title: string | null
+  entries: NewsFeedEntry[]
+}
+
 export interface RagQueryHit {
   text: string
   doc_id: string
@@ -151,6 +168,21 @@ export class ToolsClient {
 
   visit(url: string, maxChars = 12_000, signal?: AbortSignal): Promise<VisitResult> {
     return this.request('POST', '/visit', { url, max_chars: maxChars }, bounded(signal))
+  }
+
+  // --- news (M6) ----------------------------------------------------------------
+
+  /** Sync — one conditional GET + parse. Pass the stored etag/lastModified or null. */
+  newsFetch(
+    input: { url: string; etag: string | null; lastModified: string | null },
+    signal?: AbortSignal
+  ): Promise<NewsFetchResult> {
+    return this.request(
+      'POST',
+      '/news/fetch',
+      { url: input.url, etag: input.etag, last_modified: input.lastModified },
+      bounded(signal)
+    )
   }
 
   // --- RAG ----------------------------------------------------------------------
