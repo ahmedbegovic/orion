@@ -97,6 +97,8 @@ export class ModelService {
   private unloadEpoch = 0
   /** Registry fingerprint the running engine was spawned with. */
   private appliedRegistryKey: string | null = null
+  /** Reasoning parser the engine was spawned with; null = raw passthrough. */
+  private spawnReasoningParser: string | null = null
   private pendingRegistryRestart = false
   /** Last unix ms the engine was busy (or had nothing loaded) — idle-unload clock. */
   private lastBusyAt = Date.now()
@@ -209,19 +211,30 @@ export class ModelService {
     }))
   }
 
-  private writeConfig(port: number): EngineConfigModel[] {
+  private writeConfig(port: number): { entries: EngineConfigModel[]; reasoningParser: string | null } {
     const entries = this.registryEntries()
-    writeEngineConfig({
+    const { reasoningParser } = writeEngineConfig({
       port,
       models: entries,
       budgetGB: this.deps.ramGuard.report(0).budgetGB
     })
-    return entries
+    return { entries, reasoningParser }
   }
 
   /** Called from the engine ManagedProcess command() at every spawn. */
   writeConfigForSpawn(port: number): void {
-    this.appliedRegistryKey = registryKey(this.writeConfig(port))
+    const { entries, reasoningParser } = this.writeConfig(port)
+    this.appliedRegistryKey = registryKey(entries)
+    this.spawnReasoningParser = reasoningParser
+  }
+
+  /**
+   * Reasoning parser the engine was spawned with. null means the registry was
+   * mixed-family and the engine streams raw text — gemma agent sessions would
+   * hang on unparsed thought channels, so callers must surface this.
+   */
+  reasoningParser(): string | null {
+    return this.spawnReasoningParser
   }
 
   /**

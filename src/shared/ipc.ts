@@ -241,7 +241,17 @@ export const mcpServerSchema = z.object({
 
 export const skillMetaSchema = z.object({
   name: z.string(),
-  description: z.string()
+  description: z.string(),
+  /** True when the skill is symlinked into opencode (Agent/Code tabs). */
+  agentEnabled: z.boolean()
+})
+
+export const agentSessionMetaSchema = z.object({
+  id: z.string(),
+  directory: z.string(),
+  title: z.string().nullable(),
+  createdAt: z.number(),
+  lastUsedAt: z.number().nullable()
 })
 
 // ---------------------------------------------------------------------------
@@ -429,6 +439,69 @@ export const contract = {
   'skills.list': {
     input: z.undefined(),
     output: z.object({ skills: z.array(skillMetaSchema) })
+  },
+  'skills.setAgentEnabled': {
+    /** Symlinks the skill into ~/.config/opencode/skills for Agent/Code tabs. */
+    input: z.object({ name: z.string(), enabled: z.boolean() }),
+    output: z.object({ ok: z.boolean() })
+  },
+
+  // --- agent (opencode) -------------------------------------------------------------
+  'agent.sessions': {
+    input: z.undefined(),
+    output: z.object({ sessions: z.array(agentSessionMetaSchema) })
+  },
+  'agent.create': {
+    input: z.object({ directory: z.string(), tier: tierSchema.optional() }),
+    output: z.object({ session: agentSessionMetaSchema })
+  },
+  'agent.get': {
+    /** Session meta + opencode's message list verbatim ([{info, parts}]). */
+    input: z.object({ sessionId: z.string() }),
+    output: z.object({ session: agentSessionMetaSchema, messages: z.array(z.unknown()) })
+  },
+  'agent.prompt': {
+    /** Fire-and-forget; progress streams via agent.event. */
+    input: z.object({ sessionId: z.string(), text: z.string(), tier: tierSchema.optional() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'agent.abort': {
+    input: z.object({ sessionId: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'agent.permissionReply': {
+    input: z.object({
+      sessionId: z.string(),
+      permissionId: z.string(),
+      reply: z.enum(['once', 'always', 'reject'])
+    }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'agent.delete': {
+    input: z.object({ sessionId: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'agent.pickDirectory': {
+    /** Native folder picker; null when cancelled. */
+    input: z.undefined(),
+    output: z.object({ path: z.string().nullable() })
+  },
+
+  // --- agent memory ------------------------------------------------------------------
+  'memory.list': {
+    input: z.undefined(),
+    output: z.object({
+      files: z.array(z.object({ name: z.string(), updatedAt: z.number() }))
+    })
+  },
+  'memory.read': {
+    input: z.object({ name: z.string() }),
+    output: z.object({ content: z.string() })
+  },
+  'memory.write': {
+    /** Empty content deletes the file. */
+    input: z.object({ name: z.string(), content: z.string() }),
+    output: z.object({ ok: z.boolean() })
   }
 } as const
 
@@ -508,6 +581,18 @@ export const orionEventSchema = z.discriminatedUnion('type', [
     type: z.literal('chat.titleChanged'),
     conversationId: z.string(),
     title: z.string()
+  }),
+  z.object({
+    /** Raw opencode SSE event for one of our sessions — renderer casts. */
+    type: z.literal('agent.event'),
+    sessionId: z.string(),
+    event: z.unknown()
+  }),
+  z.object({
+    /** Permission ask surfaced from opencode; reply via agent.permissionReply. */
+    type: z.literal('agent.permissionRequest'),
+    sessionId: z.string(),
+    request: z.unknown()
   }),
   z.object({
     type: z.literal('library.docStatus'),

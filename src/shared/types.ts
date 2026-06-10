@@ -242,4 +242,14 @@ export interface McpServer {
 export interface SkillMeta {
   name: string
   description: string
+  /** True when the skill is symlinked into opencode (Agent/Code tabs). */
+  agentEnabled: boolean
+}
+
+export interface AgentSessionMeta {
+  id: string
+  directory: string
+  title: string | null
+  createdAt: number
+  lastUsedAt: number | null
 }

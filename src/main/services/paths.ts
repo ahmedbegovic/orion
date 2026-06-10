@@ -14,6 +14,11 @@ export function dataDir(): string {
   return app.getPath('userData')
 }
 
+/** Bundled static assets (MCP shims etc.): resources/ in dev, Resources/ packaged. */
+export function resourcesDir(): string {
+  return app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources')
+}
+
 /**
  * uv binary: dev uses PATH; packaged app ships a pinned binary in Resources/bin.
  * Sidecar venvs live outside the read-only .app (created by first-run bootstrap).

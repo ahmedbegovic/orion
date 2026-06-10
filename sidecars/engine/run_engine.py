@@ -85,6 +85,13 @@ def build_argv(config_path: Path) -> list[str]:
         # Weights come from the shared HF cache; downloads are the tools sidecar's job.
         "--offline",
     ]
+    # The parser is a server-wide global in vllm-mlx, so main only sets it when
+    # every registry model shares a family. Without it gemma's raw
+    # <|channel>thought blocks reach OpenAI clients that can't parse them
+    # (opencode loops forever waiting for visible text).
+    reasoning_parser = config.get("reasoning_parser")
+    if reasoning_parser:
+        argv += ["--reasoning-parser", str(reasoning_parser)]
     # Deliberately simple mode, no KV-cache quantization: the KV-quant flags
     # only take effect under --continuous-batching, and vllm-mlx 0.3.0's
     # batched path cannot generate with gemma-4 models at all
@@ -114,6 +121,7 @@ def main() -> None:
     # hit the actual server. Imported late so config errors stay fast.
     sys.argv = argv
     _patch_registry_model_name()
+    _patch_mllm_tool_history()
     from vllm_mlx.cli import main as cli_main
 
     cli_main()
@@ -135,6 +143,71 @@ def _patch_registry_model_name() -> None:
         server._model_name = "vllm-mlx"
 
     server.load_model_registry = patched
+
+
+def _patch_mllm_tool_history() -> None:
+    """Work around a vllm-mlx 0.3.0 bug: _prepare_chat_messages routes MLLM
+    models (all gemma-4) around extract_multimodal_content "to keep embedded
+    images", so assistant tool_calls and role='tool' turns reach the gemma chat
+    template raw — which silently drops them. Every agent round then looks like
+    a fresh question and the model re-calls the same tool forever (reproduced
+    live with opencode). Text-encode tool history into plain turns first, in
+    the exact shapes the LLM path produces; _normalize_messages then merges any
+    consecutive same-role turns the encoding creates.
+    """
+    import vllm_mlx.server as server
+
+    def _text_of(content) -> str:  # noqa: ANN001 — content is str | list | None
+        if isinstance(content, list):
+            return "".join(
+                part.get("text", "") for part in content if isinstance(part, dict)
+            )
+        return content or ""
+
+    def _encode(request_messages: list) -> list:
+        encoded = []
+        for msg in request_messages:
+            if hasattr(msg, "model_dump"):
+                d = msg.model_dump(exclude_none=True)
+            else:
+                d = {k: v for k, v in dict(msg).items() if v is not None}
+            role = d.get("role")
+            if role == "assistant" and d.get("tool_calls"):
+                calls = "\n".join(
+                    "[Calling tool: {}({})]".format(
+                        (tc.get("function") or {}).get("name") or "?",
+                        (tc.get("function") or {}).get("arguments") or "",
+                    )
+                    for tc in d["tool_calls"]
+                    if isinstance(tc, dict)
+                )
+                text = _text_of(d.get("content"))
+                encoded.append(
+                    {"role": "assistant", "content": f"{text}\n{calls}".strip()}
+                )
+            elif role == "tool":
+                encoded.append(
+                    {
+                        "role": "user",
+                        "content": "[Tool Result ({})]: {}".format(
+                            d.get("tool_call_id") or "", _text_of(d.get("content"))
+                        ),
+                    }
+                )
+            else:
+                encoded.append(msg)
+        return encoded
+
+    original = server._prepare_chat_messages
+
+    def patched(engine, request_messages):  # noqa: ANN001 — mirrors upstream
+        if getattr(engine, "is_mllm", False) and not getattr(
+            engine, "preserve_native_tool_format", False
+        ):
+            request_messages = _encode(request_messages)
+        return original(engine, request_messages)
+
+    server._prepare_chat_messages = patched
 
 
 if __name__ == "__main__":

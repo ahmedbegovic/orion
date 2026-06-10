@@ -282,9 +282,25 @@ export class ProcessManager {
   constructor(private readonly onChange: ProcessChangeListener) {}
 
   register(spec: ManagedProcessSpec): ManagedProcess {
+    // Overwriting a live entry would drop it from the map while its child
+    // keeps running (detached process group) — shutdown() could never reach
+    // it. Callers must stop and unregister before re-registering a name.
+    const existing = this.procs.get(spec.name)
+    if (existing) {
+      const state = existing.snapshot().state
+      if (state !== 'stopped' && state !== 'failed') {
+        throw new Error(`process ${spec.name} is still ${state}`)
+      }
+    }
     const proc = new ManagedProcess(spec, this.onChange)
     this.procs.set(spec.name, proc)
     return proc
+  }
+
+  /** Remove a process from supervision; pass `instance` to guard against races. */
+  unregister(name: string, instance?: ManagedProcess): void {
+    const cur = this.procs.get(name)
+    if (cur && (!instance || cur === instance)) this.procs.delete(name)
   }
 
   get(name: string): ManagedProcess | undefined {

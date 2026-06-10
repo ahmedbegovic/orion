@@ -14,11 +14,14 @@ import { ChatOrchestrator } from './services/chat/orchestrator'
 import { LibraryService } from './services/library-service'
 import { McpManager } from './services/mcp-manager'
 import { SkillsService } from './services/skills'
+import { OpencodePool } from './services/opencode-pool'
+import { AgentService } from './services/agent-service'
 import { registerModelsFeature } from './features/models'
 import { registerChatFeature } from './features/chat'
 import { registerLibraryFeature } from './features/library'
 import { registerMcpFeature } from './features/mcp'
 import { registerSkillsFeature } from './features/skills'
+import { registerAgentFeature } from './features/agent'
 import { attachRouter, handle } from './ipc/router'
 import { broadcast } from './ipc/events'
 
@@ -34,6 +37,7 @@ let modelService: ModelService | null = null
 let orchestrator: ChatOrchestrator | null = null
 let libraryService: LibraryService | null = null
 let mcpManager: McpManager | null = null
+let opencodePool: OpencodePool | null = null
 
 const processManager = new ProcessManager((snapshot) =>
   broadcast({ type: 'system.processState', process: snapshot })
@@ -85,6 +89,11 @@ function registerIpcHandlers(): void {
   }))
 
   handle('system.restartProcess', async ({ name }) => {
+    // A restart outside the pool would leave the server without an SSE pump
+    // (permission asks lost) and outside the LRU/idle lifecycle.
+    if (name.startsWith('opencode:')) {
+      throw new Error('opencode servers are managed by the agent pool')
+    }
     const proc = processManager.get(name)
     if (!proc) throw new Error(`No such process: ${name}`)
     await proc.restart('user request')
@@ -166,6 +175,16 @@ app.whenReady().then(async () => {
   registerMcpFeature(mcpManager)
   registerSkillsFeature(skillsService)
 
+  opencodePool = new OpencodePool({
+    processManager,
+    getEnginePort: () => ports.engine,
+    getToolsPort: () => ports.tools,
+    installedModels: () => models.overview().installed
+  })
+  const agentService = new AgentService({ db, pool: opencodePool, modelService, broadcast })
+  agentService.init()
+  registerAgentFeature(agentService)
+
   attachRouter()
 
   await createWindow()
@@ -195,6 +214,9 @@ app.on('before-quit', (event) => {
       orchestrator?.dispose()
       libraryService?.dispose()
       await mcpManager?.dispose()
+      // The pool's idle timer and opencode servers must stop before the
+      // supervisor shutdown so nothing tries to respawn mid-quit.
+      await opencodePool?.dispose()
       await processManager.shutdown()
       db?.close()
     } catch (err) {

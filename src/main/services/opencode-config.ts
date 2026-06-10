@@ -1,0 +1,90 @@
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import type { InstalledModel } from '@shared/types'
+import { TIERS, TIER_ORDER, modelDisplayName, type TierSpec } from '@shared/model-tiers'
+import { dataDir, resourcesDir } from './paths'
+
+export interface OpencodeConfigOptions {
+  enginePort: number
+  toolsPort: number
+  /** Installed chat models (modelService.overview().installed). */
+  models: InstalledModel[]
+}
+
+const tierSpecFor = (repoId: string): TierSpec | undefined => {
+  const tier = TIER_ORDER.find((t) => TIERS[t].candidates.includes(repoId))
+  return tier ? TIERS[tier] : undefined
+}
+
+export function opencodeConfigPath(): string {
+  return join(dataDir(), 'opencode', 'opencode.json')
+}
+
+/**
+ * Order-insensitive fingerprint of everything the generated config depends
+ * on — a running server whose key drifted is serving a stale config (engine
+ * port moved, model installed/removed) and must be respawned before use.
+ */
+export function opencodeConfigKey(opts: OpencodeConfigOptions): string {
+  return JSON.stringify([
+    opts.enginePort,
+    opts.toolsPort,
+    opts.models.map((m) => [m.repoId, m.contextLength]).sort()
+  ])
+}
+
+/**
+ * Write the opencode config — the contract between Electron main (writer) and
+ * the `opencode serve` pool servers (readers, via OPENCODE_CONFIG). Rewritten
+ * at every server spawn so ports and the model list are always current.
+ * opencode merge-loads ~/.config/opencode/* first; this file wins for the
+ * keys it sets. Pure function of its inputs.
+ */
+export function writeOpencodeConfig(opts: OpencodeConfigOptions): string {
+  const models: Record<string, unknown> = {}
+  for (const m of opts.models) {
+    const spec = tierSpecFor(m.repoId)
+    models[m.repoId] = {
+      name: modelDisplayName(m.repoId),
+      limit: {
+        context: m.contextLength ?? spec?.defaultCtx ?? 32768,
+        // Only ultra carries a cap (maxOutputTokens) — its fp16 KV growth on a
+        // runaway generation is what would blow the RAM budget.
+        output: spec?.maxOutputTokens ?? m.contextLength ?? 32768
+      }
+    }
+  }
+  const config = {
+    $schema: 'https://opencode.ai/config.json',
+    provider: {
+      orion: {
+        npm: '@ai-sdk/openai-compatible',
+        name: 'Orion Local',
+        options: { baseURL: `http://127.0.0.1:${opts.enginePort}/v1` },
+        models
+      }
+    },
+    mcp: {
+      // The key prefixes the tool names (orion_web_web_search). It must stay
+      // hyphen-free: gemma emits tool calls for hyphenated names in a mangled
+      // format the engine's gemma parser cannot parse (verified live).
+      orion_web: {
+        type: 'local',
+        command: ['node', join(resourcesDir(), 'orion-web-mcp.mjs')],
+        environment: { ORION_TOOLS_URL: `http://127.0.0.1:${opts.toolsPort}` },
+        enabled: true
+      }
+    },
+    instructions: [join(dataDir(), 'memory', '*.md')],
+    permission: { edit: 'ask', bash: 'ask', webfetch: 'allow' }
+  }
+  const path = opencodeConfigPath()
+  mkdirSync(dirname(path), { recursive: true })
+  // Write-temp-then-rename (atomic on APFS): both pool slots read this one
+  // path at boot, and a reader must never observe a truncated file — losing
+  // the permission block would drop the edit/bash ask gate for that server.
+  const tmp = `${path}.${crypto.randomUUID()}.tmp`
+  writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n')
+  renameSync(tmp, path)
+  return path
+}

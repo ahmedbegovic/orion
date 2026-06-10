@@ -38,6 +38,9 @@ const TABS: TabDef[] = [
 
 export default function App() {
   const [active, setActive] = useState<TabId>('chat')
+  // Tabs mount lazily on first activation (so e.g. AgentTab's init doesn't
+  // spawn an opencode server at boot) and stay mounted afterwards.
+  const [visited, setVisited] = useState<Set<TabId>>(() => new Set<TabId>(['chat']))
   const init = useSystemStore((s) => s.init)
 
   useEffect(() => {
@@ -56,7 +59,10 @@ export default function App() {
               return (
                 <button
                   key={id}
-                  onClick={() => setActive(id)}
+                  onClick={() => {
+                    setActive(id)
+                    setVisited((prev) => (prev.has(id) ? prev : new Set(prev).add(id)))
+                  }}
                   className={`no-drag flex w-full flex-col items-center gap-1 rounded-lg py-2.5 text-[10px] font-medium transition-colors ${
                     selected
                       ? 'bg-zinc-800 text-zinc-100'
@@ -71,10 +77,10 @@ export default function App() {
           </div>
         </nav>
 
-        {/* Main area: keep every tab mounted so state survives switching */}
+        {/* Main area: visited tabs stay mounted so state survives switching */}
         <main className="relative min-w-0 flex-1 bg-zinc-925" style={{ backgroundColor: '#101013' }}>
           <div className="drag-region absolute inset-x-0 top-0 z-10 h-9" />
-          {TABS.map(({ id, component: Tab }) => (
+          {TABS.filter(({ id }) => visited.has(id)).map(({ id, component: Tab }) => (
             <div key={id} className={`h-full ${id === active ? 'block' : 'hidden'}`}>
               <Tab />
             </div>

@@ -1,5 +1,16 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  symlinkSync,
+  unlinkSync,
+  type Stats
+} from 'node:fs'
+import { homedir } from 'node:os'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import type { SkillMeta } from '@shared/types'
 import { dataDir } from './paths'
 import { scopedLogger } from './logger'
@@ -11,6 +22,8 @@ import { scopedLogger } from './logger'
  */
 export class SkillsService {
   private readonly dir = join(dataDir(), 'skills')
+  /** opencode discovers skills here; enabling = symlinking ours in. */
+  private readonly opencodeDir = join(homedir(), '.config', 'opencode', 'skills')
   private readonly log = scopedLogger('skills')
 
   init(): void {
@@ -32,9 +45,11 @@ export class SkillsService {
       if (!existsSync(file)) continue
       try {
         const { frontmatter } = splitFrontmatter(readFileSync(file, 'utf8'))
+        const skillName = frontmatter.name || name
         skills.push({
-          name: frontmatter.name || name,
-          description: frontmatter.description || ''
+          name: skillName,
+          description: frontmatter.description || '',
+          agentEnabled: this.isAgentEnabled(skillName)
         })
       } catch (err) {
         this.log.warn(`skipping skill ${name}: ${err instanceof Error ? err.message : err}`)
@@ -45,14 +60,60 @@ export class SkillsService {
 
   /** Full SKILL.md body (frontmatter stripped), or null when unknown. */
   useSkill(name: string): string | null {
-    // Frontmatter name wins over directory name, so resolve via list().
-    const meta = this.list().find((s) => s.name === name)
-    if (!meta) return null
+    const dir = this.dirFor(name)
+    if (!dir) return null
+    const { body } = splitFrontmatter(readFileSync(join(dir, 'SKILL.md'), 'utf8'))
+    return body.trim()
+  }
+
+  /** Symlinks the skill into (or out of) opencode's skills dir for Agent/Code tabs. */
+  setAgentEnabled(name: string, enabled: boolean): void {
+    // Frontmatter names feed the link path — keep them to a single segment.
+    if (basename(name) !== name || name === '.' || name === '..') {
+      throw new Error(`Invalid skill name: ${name}`)
+    }
+    const link = join(this.opencodeDir, name)
+    if (!enabled) {
+      // Remove only a symlink that resolves into our skills dir — never a
+      // directory or link the user placed there themselves.
+      if (this.isAgentEnabled(name)) unlinkSync(link)
+      return
+    }
+    const dir = this.dirFor(name)
+    if (!dir) throw new Error(`No such skill: ${name}`)
+    mkdirSync(this.opencodeDir, { recursive: true })
+    let stat: Stats | null = null
+    try {
+      stat = lstatSync(link)
+    } catch {
+      // nothing at the link path
+    }
+    if (stat) {
+      if (!stat.isSymbolicLink()) throw new Error(`${link} already exists and is not a symlink`)
+      unlinkSync(link) // re-point a stale link
+    }
+    symlinkSync(dir, link, 'dir')
+  }
+
+  /** True when ~/.config/opencode/skills/<name> is a symlink into our skills dir. */
+  private isAgentEnabled(name: string): boolean {
+    const link = join(this.opencodeDir, name)
+    try {
+      if (!lstatSync(link).isSymbolicLink()) return false
+      // readlink (not realpath) so stale links to deleted skills still match.
+      return resolve(dirname(link), readlinkSync(link)).startsWith(this.dir + sep)
+    } catch {
+      return false
+    }
+  }
+
+  /** Skill directory for an effective name — frontmatter name wins over directory name. */
+  private dirFor(name: string): string | null {
     for (const dirName of readdirSync(this.dir)) {
       const file = join(this.dir, dirName, 'SKILL.md')
       if (!existsSync(file)) continue
-      const { frontmatter, body } = splitFrontmatter(readFileSync(file, 'utf8'))
-      if ((frontmatter.name || dirName) === name) return body.trim()
+      const { frontmatter } = splitFrontmatter(readFileSync(file, 'utf8'))
+      if ((frontmatter.name || dirName) === name) return join(this.dir, dirName)
     }
     return null
   }
