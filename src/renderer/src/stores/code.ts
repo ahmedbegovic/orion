@@ -14,9 +14,70 @@ export interface OpenFile {
   conflict: boolean
 }
 
+/** A pending Cut/Copy from the file tree's context menu. */
+export interface CodeClipboard {
+  /** Workspace-relative source path. */
+  path: string
+  op: 'cut' | 'copy'
+}
+
 function parentDir(path: string): string {
   const i = path.lastIndexOf('/')
   return i === -1 ? '' : path.slice(0, i)
+}
+
+function baseName(path: string): string {
+  const i = path.lastIndexOf('/')
+  return i === -1 ? path : path.slice(i + 1)
+}
+
+/** Prefix-remap after a move: `from` itself and anything under `from/` follow it. */
+function remapPath(path: string, from: string, to: string): string {
+  if (path === from) return to
+  return path.startsWith(from + '/') ? to + path.slice(from.length) : path
+}
+
+/** 'name.ts' → 'name copy.ts' → 'name copy 2.ts'; dirs/dotfiles suffix the whole name. */
+function copyName(name: string, isDir: boolean, taken: Set<string>): string {
+  const dot = isDir ? -1 : name.lastIndexOf('.')
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const ext = dot > 0 ? name.slice(dot) : ''
+  for (let n = 1; ; n++) {
+    const candidate = `${stem} copy${n > 1 ? ` ${n}` : ''}${ext}`
+    if (!taken.has(candidate)) return candidate
+  }
+}
+
+/**
+ * Open buffers (dirty/conflict state intact), the active path, and loaded-tree
+ * state all follow a move — remapped expanded/childrenByDir keys keep an
+ * expanded moved dir from rendering a stuck "Loading…". The stale row left in
+ * the source's parent listing is corrected by the caller's loadDir refresh.
+ */
+function movedState(
+  s: Pick<CodeStore, 'openFiles' | 'activePath' | 'childrenByDir' | 'expanded'>,
+  from: string,
+  to: string
+): Pick<CodeStore, 'openFiles' | 'activePath' | 'childrenByDir' | 'expanded'> {
+  const childrenByDir: Record<string, WorkspaceEntry[]> = {}
+  for (const [dir, entries] of Object.entries(s.childrenByDir)) {
+    const key = remapPath(dir, from, to)
+    childrenByDir[key] =
+      key === dir ? entries : entries.map((e) => ({ ...e, path: remapPath(e.path, from, to) }))
+  }
+  const expanded: Record<string, boolean> = {}
+  for (const [dir, open] of Object.entries(s.expanded)) {
+    expanded[remapPath(dir, from, to)] = open
+  }
+  return {
+    openFiles: s.openFiles.map((f) => {
+      const path = remapPath(f.path, from, to)
+      return path === f.path ? f : { ...f, path }
+    }),
+    activePath: s.activePath === null ? null : remapPath(s.activePath, from, to),
+    childrenByDir,
+    expanded
+  }
 }
 
 // Cmd+S is handled by both a monaco command and a DOM keydown fallback — the
@@ -47,6 +108,21 @@ interface CodeStore {
   reloadFromDisk: (path: string) => Promise<void>
   /** Drops the buffer without saving — callers confirm dirty closes first. */
   closeFile: (path: string) => void
+  clipboard: CodeClipboard | null
+  setClipboard: (path: string, op: 'cut' | 'copy') => void
+  clearClipboard: () => void
+  /** Creates dir/name ('' = root level), refreshes the listing, opens the file. */
+  createFile: (dir: string, name: string) => Promise<void>
+  createDir: (dir: string, name: string) => Promise<void>
+  /** Move within the same parent; open buffers and tree state follow the new path. */
+  renameEntry: (path: string, newName: string) => Promise<void>
+  /** To the macOS Trash; buffers under the path close without a dirty confirm. */
+  deleteEntry: (path: string) => Promise<void>
+  /** Pastes the clipboard; sibling name clashes get ' copy' / ' copy N' names. */
+  pasteInto: (dir: string) => Promise<void>
+  /** code.copy next to the source with the next free ' copy' name. */
+  duplicateEntry: (path: string) => Promise<void>
+  reveal: (path: string) => Promise<void>
 }
 
 export const useCodeStore = create<CodeStore>((set, get) => ({
@@ -56,6 +132,7 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   openFiles: [],
   activePath: null,
   initialized: false,
+  clipboard: null,
 
   init: async () => {
     if (get().initialized) return
@@ -160,14 +237,22 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
       childrenByDir: { '': entries },
       expanded: {},
       openFiles: [],
-      activePath: null
+      activePath: null,
+      clipboard: null
     })
   },
 
   closeWorkspace: async () => {
     const root = get().root
     if (!root) return
-    set({ root: null, childrenByDir: {}, expanded: {}, openFiles: [], activePath: null })
+    set({
+      root: null,
+      childrenByDir: {},
+      expanded: {},
+      openFiles: [],
+      activePath: null,
+      clipboard: null
+    })
     await call('code.closeWorkspace', { root })
   },
 
@@ -286,5 +371,130 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
             : s.activePath
       }
     })
+  },
+
+  setClipboard: (path, op) => set({ clipboard: { path, op } }),
+
+  clearClipboard: () => set({ clipboard: null }),
+
+  // The fsChanged watcher re-lists the same dirs ~250ms after each mutation
+  // below — the loadDir refreshes here are idempotent with that batch.
+  createFile: async (dir, name) => {
+    const root = get().root
+    if (!root) return
+    const path = dir ? `${dir}/${name}` : name
+    await call('code.createFile', { root, path })
+    if (get().root !== root) return
+    await get().loadDir(dir)
+    await get().openFile(path)
+  },
+
+  createDir: async (dir, name) => {
+    const root = get().root
+    if (!root) return
+    const path = dir ? `${dir}/${name}` : name
+    await call('code.createDir', { root, path })
+    if (get().root !== root) return
+    set((s) => ({ expanded: { ...s.expanded, [dir]: true } }))
+    await get().loadDir(dir)
+  },
+
+  renameEntry: async (path, newName) => {
+    const root = get().root
+    if (!root) return
+    const dir = parentDir(path)
+    const to = dir ? `${dir}/${newName}` : newName
+    if (to === path) return
+    await call('code.move', { root, from: path, to })
+    if (get().root !== root) return
+    set((s) => movedState(s, path, to))
+    await get().loadDir(dir)
+  },
+
+  deleteEntry: async (path) => {
+    const root = get().root
+    if (!root) return
+    await call('code.delete', { root, path })
+    if (get().root !== root) return
+    set((s) => {
+      const gone = (p: string): boolean => p === path || p.startsWith(path + '/')
+      // Trashed files are recoverable — buffers drop without a dirty confirm.
+      const activeIndex = s.openFiles.findIndex((f) => f.path === s.activePath)
+      const openFiles = s.openFiles.filter((f) => !gone(f.path))
+      const childrenByDir: Record<string, WorkspaceEntry[]> = {}
+      for (const [dir, entries] of Object.entries(s.childrenByDir)) {
+        if (!gone(dir)) childrenByDir[dir] = entries
+      }
+      const expanded = Object.fromEntries(Object.entries(s.expanded).filter(([dir]) => !gone(dir)))
+      return {
+        openFiles,
+        activePath:
+          s.activePath !== null && gone(s.activePath)
+            ? (openFiles[Math.min(activeIndex, openFiles.length - 1)]?.path ?? null)
+            : s.activePath,
+        childrenByDir,
+        expanded,
+        clipboard: s.clipboard && gone(s.clipboard.path) ? null : s.clipboard
+      }
+    })
+    await get().loadDir(parentDir(path))
+  },
+
+  pasteInto: async (dir) => {
+    const root = get().root
+    const clipboard = get().clipboard
+    if (!root || !clipboard) return
+    const source = clipboard.path
+    if (dir === source || dir.startsWith(source + '/')) {
+      throw new Error('Cannot paste a folder into itself')
+    }
+    // Cutting back into the source's own parent has nothing to move.
+    if (clipboard.op === 'cut' && parentDir(source) === dir) {
+      get().clearClipboard()
+      return
+    }
+    if (!get().childrenByDir[dir]) await get().loadDir(dir)
+    const siblings = new Set((get().childrenByDir[dir] ?? []).map((e) => e.name))
+    const sourceKind = get().childrenByDir[parentDir(source)]?.find((e) => e.path === source)?.kind
+    const base = baseName(source)
+    const name = siblings.has(base) ? copyName(base, sourceKind === 'dir', siblings) : base
+    const to = dir ? `${dir}/${name}` : name
+    if (clipboard.op === 'cut') {
+      await call('code.move', { root, from: source, to })
+      if (get().root !== root) return
+      set((s) => ({ ...movedState(s, source, to), clipboard: null }))
+      await Promise.all([get().loadDir(parentDir(source)), get().loadDir(dir)])
+    } else {
+      // Clipboard kept — a copy pastes repeatedly.
+      await call('code.copy', { root, from: source, to })
+      if (get().root !== root) return
+      await get().loadDir(dir)
+    }
+    set((s) => ({ expanded: { ...s.expanded, [dir]: true } }))
+  },
+
+  duplicateEntry: async (path) => {
+    const root = get().root
+    if (!root) return
+    const dir = parentDir(path)
+    if (!get().childrenByDir[dir]) await get().loadDir(dir)
+    const entries = get().childrenByDir[dir] ?? []
+    const siblings = new Set(entries.map((e) => e.name))
+    const isDir = entries.find((e) => e.path === path)?.kind === 'dir'
+    const name = copyName(baseName(path), isDir, siblings)
+    await call('code.copy', { root, from: path, to: dir ? `${dir}/${name}` : name })
+    if (get().root !== root) return
+    await get().loadDir(dir)
+  },
+
+  reveal: async (path) => {
+    const root = get().root
+    if (!root) return
+    await call('code.reveal', { root, path })
   }
 }))
+
+/** Paste availability for menu builders that run outside a react subscription. */
+export function hasClipboard(): boolean {
+  return useCodeStore.getState().clipboard !== null
+}

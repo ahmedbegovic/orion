@@ -1,5 +1,16 @@
-import { readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { shell } from 'electron'
 import { watch, type FSWatcher } from 'chokidar'
 import type { OrionEvent } from '@shared/ipc'
 import type { WorkspaceEntry } from '@shared/types'
@@ -118,6 +129,49 @@ export class WorkspaceFs {
     return { ok: true, mtime: Math.round(statSync(abs).mtimeMs), conflict: false }
   }
 
+  createFile(root: string, path: string): void {
+    const { abs } = this.jailedTarget(root, path)
+    if (existsSync(abs)) throw new Error(`Already exists: ${path}`)
+    writeFileSync(abs, '')
+  }
+
+  createDir(root: string, path: string): void {
+    const { abs } = this.jailedTarget(root, path)
+    if (existsSync(abs)) throw new Error(`Already exists: ${path}`)
+    mkdirSync(abs)
+  }
+
+  move(root: string, from: string, to: string): void {
+    const src = this.jailed(root, from)
+    const dst = this.jailedTarget(root, to)
+    if (!existsSync(src.abs)) throw new Error(`No such file or directory: ${from}`)
+    if (existsSync(dst.abs)) throw new Error(`Already exists: ${to}`)
+    this.refuseIntoSelf(src.abs, dst.abs, 'move', from)
+    renameSync(src.abs, dst.abs)
+  }
+
+  copy(root: string, from: string, to: string): void {
+    const src = this.jailed(root, from)
+    const dst = this.jailedTarget(root, to)
+    if (!existsSync(src.abs)) throw new Error(`No such file or directory: ${from}`)
+    if (existsSync(dst.abs)) throw new Error(`Already exists: ${to}`)
+    this.refuseIntoSelf(src.abs, dst.abs, 'copy', from)
+    cpSync(src.abs, dst.abs, { recursive: true, errorOnExist: true, force: false })
+  }
+
+  /** Recoverable delete — macOS Trash, never a hard unlink. */
+  async deleteEntry(root: string, path: string): Promise<void> {
+    const { abs, rel } = this.jailed(root, path)
+    if (rel === '') throw new Error('Refusing to trash the workspace root')
+    if (!existsSync(abs)) throw new Error(`No such file or directory: ${path}`)
+    await shell.trashItem(abs)
+  }
+
+  revealEntry(root: string, path: string): void {
+    const { abs } = this.jailed(root, path)
+    shell.showItemInFolder(abs)
+  }
+
   async dispose(): Promise<void> {
     await Promise.all([...this.watchers.keys()].map((root) => this.closeWorkspace(root)))
   }
@@ -190,5 +244,44 @@ export class WorkspaceFs {
       throw new Error(`Path escapes the workspace: ${relPath}`)
     }
     return { abs: join(parentReal, basename(abs)), rel: segments.join('/') }
+  }
+
+  /**
+   * jailed() for paths being created (new entries, move/copy destinations):
+   * a missing intermediate directory otherwise surfaces as realpathSync's
+   * cryptic ENOENT, and a file in the parent position would only fail at the
+   * eventual fs call.
+   */
+  private jailedTarget(root: string, relPath: string): { abs: string; rel: string } {
+    let target: { abs: string; rel: string }
+    try {
+      target = this.jailed(root, relPath)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error(`Parent directory does not exist: ${relPath}`)
+      }
+      throw err
+    }
+    if (target.rel !== '' && !statSync(dirname(target.abs)).isDirectory()) {
+      throw new Error(`Parent directory does not exist: ${relPath}`)
+    }
+    return target
+  }
+
+  /**
+   * renameSync EINVALs (cryptically) when a directory is targeted at its own
+   * subtree, and cpSync would recurse forever — refuse upfront. Callers verify
+   * the source exists first, so statSync here is safe.
+   */
+  private refuseIntoSelf(
+    srcAbs: string,
+    dstAbs: string,
+    verb: 'move' | 'copy',
+    from: string
+  ): void {
+    if (!statSync(srcAbs).isDirectory()) return
+    if (dstAbs === srcAbs || dstAbs.startsWith(srcAbs + sep)) {
+      throw new Error(`Cannot ${verb} a directory into itself: ${from}`)
+    }
   }
 }

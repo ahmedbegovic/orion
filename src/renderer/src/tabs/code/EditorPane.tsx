@@ -6,47 +6,31 @@ import { useCodeStore, type OpenFile } from '@/stores/code'
 import { toastError } from '@/stores/toasts'
 import ConfirmDialog from '@/components/ConfirmDialog'
 
-// Explicit map for the common cases; unmapped extensions fall back to monaco's
-// own filename-based detection (language === undefined).
-const LANGUAGE_BY_EXT: Record<string, string> = {
-  ts: 'typescript',
-  tsx: 'typescript',
-  mts: 'typescript',
-  cts: 'typescript',
-  js: 'javascript',
-  jsx: 'javascript',
-  mjs: 'javascript',
-  cjs: 'javascript',
-  json: 'json',
-  jsonc: 'json',
-  css: 'css',
-  scss: 'scss',
-  less: 'less',
-  html: 'html',
-  htm: 'html',
-  xml: 'xml',
-  svg: 'xml',
-  md: 'markdown',
-  py: 'python',
-  rs: 'rust',
-  go: 'go',
-  c: 'c',
-  h: 'c',
-  cpp: 'cpp',
-  hpp: 'cpp',
-  java: 'java',
-  rb: 'ruby',
-  swift: 'swift',
-  kt: 'kotlin',
-  sh: 'shell',
-  bash: 'shell',
-  zsh: 'shell',
-  yml: 'yaml',
-  yaml: 'yaml',
+// Detection comes from monaco's own language registry (every bundled monarch
+// grammar declares its extensions/filenames — ~80 languages incl. python,
+// Dockerfile, Makefile). The override map only settles ambiguous extensions.
+const LANGUAGE_OVERRIDES: Record<string, string> = {
   toml: 'ini',
-  ini: 'ini',
-  sql: 'sql',
-  txt: 'plaintext'
+  svg: 'xml',
+  zsh: 'shell'
+}
+
+let extToLanguage: Map<string, string> | null = null
+let filenameToLanguage: Map<string, string> | null = null
+
+function buildLanguageIndex(): void {
+  extToLanguage = new Map()
+  filenameToLanguage = new Map()
+  for (const lang of monaco.languages.getLanguages()) {
+    for (const ext of lang.extensions ?? []) {
+      const key = ext.replace(/^\./, '').toLowerCase()
+      if (!extToLanguage.has(key)) extToLanguage.set(key, lang.id)
+    }
+    for (const filename of lang.filenames ?? []) {
+      const key = filename.toLowerCase()
+      if (!filenameToLanguage.has(key)) filenameToLanguage.set(key, lang.id)
+    }
+  }
 }
 
 function baseName(path: string): string {
@@ -54,10 +38,14 @@ function baseName(path: string): string {
 }
 
 function languageFor(path: string): string | undefined {
-  const name = baseName(path)
+  if (!extToLanguage || !filenameToLanguage) buildLanguageIndex()
+  const name = baseName(path).toLowerCase()
+  const byFilename = filenameToLanguage!.get(name)
+  if (byFilename) return byFilename
   const dot = name.lastIndexOf('.')
   if (dot <= 0) return undefined
-  return LANGUAGE_BY_EXT[name.slice(dot + 1).toLowerCase()]
+  const ext = name.slice(dot + 1)
+  return LANGUAGE_OVERRIDES[ext] ?? extToLanguage!.get(ext)
 }
 
 export default function EditorPane() {

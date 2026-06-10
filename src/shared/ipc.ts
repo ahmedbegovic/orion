@@ -556,6 +556,35 @@ export const contract = {
     }),
     output: z.object({ ok: z.boolean(), mtime: z.number().nullable(), conflict: z.boolean() })
   },
+  'code.createFile': {
+    /** Empty file; fails when the path already exists. */
+    input: z.object({ root: z.string(), path: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'code.createDir': {
+    input: z.object({ root: z.string(), path: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'code.move': {
+    /** Rename and cut+paste; fails when the destination exists. */
+    input: z.object({ root: z.string(), from: z.string(), to: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'code.copy': {
+    /** Recursive for directories; fails when the destination exists. */
+    input: z.object({ root: z.string(), from: z.string(), to: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'code.delete': {
+    /** Moves to the macOS Trash (recoverable), never a hard unlink. */
+    input: z.object({ root: z.string(), path: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'code.reveal': {
+    /** Reveal in Finder. */
+    input: z.object({ root: z.string(), path: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
 
   // --- terminal (node-pty) -------------------------------------------------------------
   'term.create': {

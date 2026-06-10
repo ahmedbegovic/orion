@@ -52,6 +52,36 @@ export function registerCodeFeature(deps: CodeFeatureDeps): void {
     workspaceFs.writeFile(root, path, content, expectedMtime)
   )
 
+  handle('code.createFile', ({ root, path }) => {
+    workspaceFs.createFile(root, path)
+    return { ok: true }
+  })
+
+  handle('code.createDir', ({ root, path }) => {
+    workspaceFs.createDir(root, path)
+    return { ok: true }
+  })
+
+  handle('code.move', ({ root, from, to }) => {
+    workspaceFs.move(root, from, to)
+    return { ok: true }
+  })
+
+  handle('code.copy', ({ root, from, to }) => {
+    workspaceFs.copy(root, from, to)
+    return { ok: true }
+  })
+
+  handle('code.delete', async ({ root, path }) => {
+    await workspaceFs.deleteEntry(root, path)
+    return { ok: true }
+  })
+
+  handle('code.reveal', ({ root, path }) => {
+    workspaceFs.revealEntry(root, path)
+    return { ok: true }
+  })
+
   handle('term.create', ({ cwd, cols, rows }) => ({ termId: terms.create(cwd, cols, rows) }))
 
   handle('term.write', ({ termId, data }) => {
