@@ -54,10 +54,14 @@ export function builtinToolDefs(opts: BuiltinToolOptions): ChatToolDef[] {
         type: 'function',
         function: {
           name: 'web_visit',
-          description: 'Fetch a web page and return its readable content as Markdown.',
+          description:
+            'Fetch a web page and return its readable content as Markdown. ' +
+            'Only visit URLs taken verbatim from web_search results or the user — never guess or construct URLs.',
           parameters: {
             type: 'object',
-            properties: { url: { type: 'string', description: 'Absolute URL to fetch' } },
+            properties: {
+              url: { type: 'string', description: 'Absolute URL, copied exactly from a search result' }
+            },
             required: ['url']
           }
         }
