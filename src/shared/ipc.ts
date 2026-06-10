@@ -260,6 +260,52 @@ export const workspaceEntrySchema = z.object({
   kind: z.enum(['file', 'dir'])
 })
 
+export const researchModeSchema = z.enum(['standard', 'heavy'])
+export const researchStatusSchema = z.enum([
+  'planning',
+  'rounds',
+  'synthesis',
+  'done',
+  'failed',
+  'cancelled',
+  'paused'
+])
+
+export const researchRunMetaSchema = z.object({
+  id: z.string(),
+  question: z.string(),
+  mode: researchModeSchema,
+  status: researchStatusSchema,
+  round: z.number(),
+  collectionId: z.string().nullable(),
+  tier: tierSchema.nullable(),
+  reportPath: z.string().nullable(),
+  createdAt: z.number(),
+  finishedAt: z.number().nullable()
+})
+
+export const researchStepSchema = z.object({
+  id: z.string(),
+  runId: z.string(),
+  round: z.number(),
+  seq: z.number(),
+  type: z.enum(['plan', 'search', 'select', 'visit', 'note', 'sufficiency', 'synthesis', 'render']),
+  status: z.enum(['pending', 'running', 'done', 'failed']),
+  /** Step-specific JSON; renderer casts per type. */
+  input: z.unknown(),
+  output: z.unknown(),
+  startedAt: z.number().nullable(),
+  finishedAt: z.number().nullable()
+})
+
+export const researchSourceSchema = z.object({
+  id: z.string(),
+  url: z.string(),
+  title: z.string().nullable(),
+  fetched: z.boolean(),
+  cited: z.boolean()
+})
+
 // ---------------------------------------------------------------------------
 // Method contract: renderer -> main request/response over `orion:call`.
 // Every method is zod-validated on both sides of the bridge.
@@ -586,6 +632,51 @@ export const contract = {
     output: z.object({ ok: z.boolean() })
   },
 
+  // --- research --------------------------------------------------------------------
+  'research.start': {
+    input: z.object({
+      question: z.string(),
+      mode: researchModeSchema.optional(),
+      tier: tierSchema.optional(),
+      collectionId: z.string().optional()
+    }),
+    output: z.object({ runId: z.string() })
+  },
+  'research.list': {
+    input: z.undefined(),
+    output: z.object({ runs: z.array(researchRunMetaSchema) })
+  },
+  'research.get': {
+    input: z.object({ runId: z.string() }),
+    output: z.object({
+      run: researchRunMetaSchema,
+      steps: z.array(researchStepSchema),
+      sources: z.array(researchSourceSchema)
+    })
+  },
+  'research.cancel': {
+    input: z.object({ runId: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'research.resume': {
+    /** Re-enters the loop from the last persisted step (crash recovery). */
+    input: z.object({ runId: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'research.delete': {
+    input: z.object({ runId: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'research.report': {
+    /** html for the sandboxed iframe; report = the model's structured JSON. */
+    input: z.object({ runId: z.string() }),
+    output: z.object({ html: z.string().nullable(), report: z.unknown() })
+  },
+  'research.exportPdf': {
+    input: z.object({ runId: z.string() }),
+    output: z.object({ path: z.string().nullable() })
+  },
+
   // --- terminal (node-pty) -------------------------------------------------------------
   'term.create': {
     /** Login shell with cwd inside the workspace; output streams via term.data. */
@@ -703,6 +794,18 @@ export const orionEventSchema = z.discriminatedUnion('type', [
     type: z.literal('code.fsChanged'),
     root: z.string(),
     paths: z.array(z.string())
+  }),
+  z.object({
+    /** A research step was created or changed state. */
+    type: z.literal('research.step'),
+    runId: z.string(),
+    step: researchStepSchema
+  }),
+  z.object({
+    type: z.literal('research.status'),
+    runId: z.string(),
+    status: researchStatusSchema,
+    round: z.number()
   }),
   z.object({
     /** PTY output chunk (batched ~16ms in main). */

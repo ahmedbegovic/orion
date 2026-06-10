@@ -265,3 +265,58 @@ export interface WorkspaceEntry {
   path: string
   kind: 'file' | 'dir'
 }
+
+export type ResearchMode = 'standard' | 'heavy'
+export type ResearchStatus =
+  | 'planning'
+  | 'rounds'
+  | 'synthesis'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+  | 'paused'
+export type ResearchStepType =
+  | 'plan'
+  | 'search'
+  | 'select'
+  | 'visit'
+  | 'note'
+  | 'sufficiency'
+  | 'synthesis'
+  | 'render'
+export type ResearchStepStatus = 'pending' | 'running' | 'done' | 'failed'
+
+export interface ResearchRunMeta {
+  id: string
+  question: string
+  mode: ResearchMode
+  status: ResearchStatus
+  round: number
+  collectionId: string | null
+  tier: Tier | null
+  reportPath: string | null
+  createdAt: number
+  finishedAt: number | null
+}
+
+export interface ResearchStep {
+  id: string
+  runId: string
+  round: number
+  seq: number
+  type: ResearchStepType
+  status: ResearchStepStatus
+  /** Step-specific JSON; renderer casts per type. */
+  input: unknown
+  output: unknown
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export interface ResearchSource {
+  id: string
+  url: string
+  title: string | null
+  fetched: boolean
+  cited: boolean
+}

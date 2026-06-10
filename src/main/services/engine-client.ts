@@ -51,6 +51,8 @@ export interface StreamChatOptions {
   temperature?: number
   topP?: number
   topK?: number
+  /** OpenAI response_format, e.g. {type:'json_schema', json_schema:{name, schema}}. */
+  responseFormat?: unknown
   signal?: AbortSignal
 }
 
@@ -193,6 +195,7 @@ export class EngineClient {
           temperature: opts.temperature,
           top_p: opts.topP,
           top_k: opts.topK,
+          response_format: opts.responseFormat,
           stream: true,
           // Usage arrives in the final chunk only when asked for.
           stream_options: { include_usage: true }

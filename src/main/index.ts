@@ -12,6 +12,7 @@ import { dataDir, sidecarDir, uvBinary, uvEnvFor } from './services/paths'
 import { ChatRepo } from './services/chat/repo'
 import { ChatOrchestrator } from './services/chat/orchestrator'
 import { LibraryService } from './services/library-service'
+import { ResearchOrchestrator } from './services/research-orchestrator'
 import { McpManager } from './services/mcp-manager'
 import { SkillsService } from './services/skills'
 import { OpencodePool } from './services/opencode-pool'
@@ -25,6 +26,7 @@ import { registerMcpFeature } from './features/mcp'
 import { registerSkillsFeature } from './features/skills'
 import { registerAgentFeature } from './features/agent'
 import { registerCodeFeature } from './features/code'
+import { registerResearchFeature } from './features/research'
 import { attachRouter, handle } from './ipc/router'
 import { broadcast } from './ipc/events'
 
@@ -39,6 +41,7 @@ let db: OrionDatabase | null = null
 let modelService: ModelService | null = null
 let orchestrator: ChatOrchestrator | null = null
 let libraryService: LibraryService | null = null
+let researchOrchestrator: ResearchOrchestrator | null = null
 let mcpManager: McpManager | null = null
 let opencodePool: OpencodePool | null = null
 let workspaceFs: WorkspaceFs | null = null
@@ -180,6 +183,16 @@ app.whenReady().then(async () => {
   registerMcpFeature(mcpManager)
   registerSkillsFeature(skillsService)
 
+  researchOrchestrator = new ResearchOrchestrator({
+    db,
+    engine: engineClient,
+    tools: toolsClient,
+    modelService,
+    library: libraryService,
+    broadcast
+  })
+  registerResearchFeature(researchOrchestrator)
+
   opencodePool = new OpencodePool({
     processManager,
     getEnginePort: () => ports.engine,
@@ -200,6 +213,7 @@ app.whenReady().then(async () => {
 
   void processManager.get('tools')?.start()
   void modelService.init()
+  researchOrchestrator.init()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow()
@@ -222,9 +236,11 @@ app.on('before-quit', (event) => {
       termService?.dispose()
       await workspaceFs?.dispose()
       modelService?.dispose()
-      // Chat/library/MCP teardown must precede the sidecar shutdown: abort
-      // in-flight generations and stop ingest pollers before their servers die.
+      // Chat/research/library/MCP teardown must precede the sidecar shutdown:
+      // abort in-flight generations and stop ingest pollers before their
+      // servers die.
       orchestrator?.dispose()
+      researchOrchestrator?.dispose()
       libraryService?.dispose()
       await mcpManager?.dispose()
       // The pool's idle timer and opencode servers must stop before the

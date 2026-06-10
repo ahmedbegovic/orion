@@ -102,8 +102,22 @@ export class ModelService {
   private tick = 0
   private disposed = false
   private readonly log = scopedLogger('models')
+  /** Resolved once init()'s first installed-model scan has finished (see whenReady). */
+  private resolveReady!: () => void
+  private readonly ready = new Promise<void>((resolve) => {
+    this.resolveReady = resolve
+  })
 
   constructor(private readonly deps: ModelServiceDeps) {}
+
+  /**
+   * Resolves once the boot-time installed scan (init's backoff loop) has
+   * completed — before that, overview() reports an empty installed set even
+   * when models exist on disk. Callers racing app boot await this first.
+   */
+  whenReady(): Promise<void> {
+    return this.ready
+  }
 
   async init(): Promise<void> {
     // Downloads from a previous app run died with their sidecar — surface that.
@@ -115,18 +129,24 @@ export class ModelService {
 
     // The tools sidecar may still be booting; retry the first scan with backoff.
     const delays = [1000, 2000, 4000, 8000, 15000]
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await this.refreshInstalled()
-        break
-      } catch (err) {
-        if (this.disposed) return
-        if (attempt >= delays.length) {
-          this.log.warn(`local model scan failed: ${err instanceof Error ? err.message : err}`)
+    try {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await this.refreshInstalled()
           break
+        } catch (err) {
+          if (this.disposed) return
+          if (attempt >= delays.length) {
+            this.log.warn(`local model scan failed: ${err instanceof Error ? err.message : err}`)
+            break
+          }
+          await sleep(delays[attempt])
         }
-        await sleep(delays[attempt])
       }
+    } finally {
+      // Even a failed or shutdown-interrupted scan unblocks whenReady() —
+      // waiters proceed against whatever installed set exists.
+      this.resolveReady()
     }
     await this.syncEngineRegistry()
     this.startPoller()
