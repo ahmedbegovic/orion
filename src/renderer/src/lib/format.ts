@@ -1,0 +1,28 @@
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const
+
+/** Human-readable byte count: 1234567 -> "1.2 MB". */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—'
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  const digits = unit === 0 || value >= 100 ? 0 : 1
+  return `${value.toFixed(digits).replace(/\.0$/, '')} ${BYTE_UNITS[unit]}`
+}
+
+/** Compact relative time: "just now", "5m ago", "3h ago", "2d ago". */
+export function relativeTime(unixMs: number, now: number = Date.now()): string {
+  const delta = now - unixMs
+  if (delta < 60_000) return 'just now'
+  const minutes = Math.floor(delta / 60_000)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days}d ago`
+  if (days < 365) return `${Math.floor(days / 30)}mo ago`
+  return `${Math.floor(days / 365)}y ago`
+}

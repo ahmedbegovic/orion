@@ -1,0 +1,69 @@
+import type { EngineModelInfo, RamReport } from '@shared/types'
+import type { TierSpec } from '@shared/model-tiers'
+
+/** Hard cap on the engine budget, even on bigger machines. */
+const BUDGET_CAP_GB = 18.5
+/** Leave this much for macOS + Electron + sidecars + opencode. */
+const SYSTEM_RESERVE_GB = 5.5
+const BUDGET_FLOOR_GB = 4
+
+const round2 = (n: number): number => Math.round(n * 100) / 100
+
+export interface CanLoadOptions {
+  loadedModels: EngineModelInfo[]
+  /** Tier policy for the model being loaded, when it matches a tier candidate. */
+  spec?: TierSpec
+}
+
+export type CanLoadResult = { ok: true } | { ok: false; reason: string }
+
+/** Keeps model loads from pushing the machine into swap. */
+export class RamGuard {
+  report(loadedGB: number): RamReport {
+    // NB: process.getSystemMemoryInfo() reports KILOBYTES.
+    const mem = process.getSystemMemoryInfo()
+    const totalGB = mem.total / 1024 ** 2
+    const freeGB = mem.free / 1024 ** 2
+    const budgetGB = Math.min(BUDGET_CAP_GB, Math.max(BUDGET_FLOOR_GB, totalGB - SYSTEM_RESERVE_GB))
+    return {
+      totalGB: round2(totalGB),
+      freeGB: round2(freeGB),
+      budgetGB: round2(budgetGB),
+      loadedGB: round2(loadedGB)
+    }
+  }
+
+  canLoad(estimatedGB: number, opts: CanLoadOptions): CanLoadResult {
+    const ram = this.report(0)
+    if (estimatedGB > ram.budgetGB) {
+      return {
+        ok: false,
+        reason: `Needs ~${estimatedGB.toFixed(1)} GB, which exceeds the ${ram.budgetGB.toFixed(1)} GB memory budget.`
+      }
+    }
+
+    // The engine evicts IDLE loaded models LRU-style to fit the budget, so
+    // their footprints count as reclaimable headroom — even for a noCoload
+    // (ultra) model, which simply guarantees everything else gets evicted.
+    const reclaimableGB = opts.loadedModels
+      .filter((m) => m.state === 'loaded')
+      .reduce((sum, m) => sum + (m.memoryGB ?? 0), 0)
+    const shortfallGB = estimatedGB - reclaimableGB
+
+    // Swap-storm heuristic: macOS "free" badly understates what's actually
+    // available (compressed + purgeable file-cache pages reclaim under
+    // pressure), so grant free memory a 1.5× benefit of the doubt. If the
+    // shortfall still doesn't fit, loading would mean heavy swapping.
+    if (shortfallGB > 0 && ram.freeGB * 1.5 < shortfallGB) {
+      return {
+        ok: false,
+        reason:
+          `Only ~${ram.freeGB.toFixed(1)} GB free; loading ~${estimatedGB.toFixed(1)} GB ` +
+          `(after evicting ~${reclaimableGB.toFixed(1)} GB of idle models) would likely swap. ` +
+          'Close some apps or unload models first.'
+      }
+    }
+
+    return { ok: true }
+  }
+}

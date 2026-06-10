@@ -1,0 +1,119 @@
+import { create } from 'zustand'
+import type { DownloadInfo, Feature, HFSearchResult, ModelsOverview, Tier } from '@shared/types'
+import { call, onEvent } from '@/lib/ipc'
+
+interface ModelsStore {
+  overview: ModelsOverview | null
+  searchResults: HFSearchResult[] | null
+  searching: boolean
+  initialized: boolean
+  init: () => Promise<void>
+  refresh: () => Promise<void>
+  download: (repoId: string, force?: boolean) => Promise<void>
+  cancelDownload: (id: string) => Promise<void>
+  deleteModel: (repoId: string) => Promise<void>
+  search: (query: string) => Promise<void>
+  load: (repoId: string, force?: boolean) => Promise<{ ok: boolean; reason?: string }>
+  unloadAll: () => Promise<void>
+  setDefault: (feature: Feature, tier: Tier) => Promise<void>
+}
+
+function upsertDownload(downloads: DownloadInfo[], download: DownloadInfo): DownloadInfo[] {
+  const index = downloads.findIndex((d) => d.id === download.id)
+  if (index === -1) return [download, ...downloads]
+  return downloads.map((d, i) => (i === index ? download : d))
+}
+
+export const useModelsStore = create<ModelsStore>((set, get) => ({
+  overview: null,
+  searchResults: null,
+  searching: false,
+  initialized: false,
+
+  init: async () => {
+    if (get().initialized) return
+    set({ initialized: true })
+    onEvent('models.downloadProgress', (event) => {
+      set((s) =>
+        s.overview
+          ? {
+              overview: {
+                ...s.overview,
+                downloads: upsertDownload(s.overview.downloads, event.download)
+              }
+            }
+          : {}
+      )
+      // A finished download changes what's installed and how tiers resolve.
+      if (event.download.status === 'done') void get().refresh()
+    })
+    onEvent('models.statusChanged', (event) =>
+      set((s) => (s.overview ? { overview: { ...s.overview, engine: event.engine } } : {}))
+    )
+    onEvent('system.ramReport', (event) =>
+      set((s) => (s.overview ? { overview: { ...s.overview, ram: event.ram } } : {}))
+    )
+    await get().refresh()
+  },
+
+  refresh: async () => {
+    const overview = await call('models.overview')
+    set({ overview })
+  },
+
+  download: async (repoId, force) => {
+    await call('models.download', { repoId, force })
+    // Pick up the queued entry right away instead of waiting for the first event.
+    await get().refresh()
+  },
+
+  cancelDownload: async (id) => {
+    await call('models.cancelDownload', { downloadId: id })
+  },
+
+  deleteModel: async (repoId) => {
+    await call('models.delete', { repoId })
+    await get().refresh()
+  },
+
+  search: async (query) => {
+    set({ searching: true })
+    try {
+      const { results } = await call('models.search', { query })
+      set({ searchResults: results })
+    } finally {
+      set({ searching: false })
+    }
+  },
+
+  load: async (repoId, force) => {
+    // Surfaced to the caller so the UI can offer "Load anyway" on a RAM-guard refusal.
+    return call('models.load', { repoId, force })
+  },
+
+  unloadAll: async () => {
+    await call('models.unloadAll')
+  },
+
+  setDefault: async (feature, tier) => {
+    // Optimistic: the select reflects the choice instantly; revert if main
+    // never persisted it so the UI can't drift from the saved defaults.
+    const prev = get().overview?.defaults[feature]
+    set((s) =>
+      s.overview
+        ? { overview: { ...s.overview, defaults: { ...s.overview.defaults, [feature]: tier } } }
+        : {}
+    )
+    try {
+      await call('models.setDefault', { feature, tier })
+    } catch (err) {
+      if (prev)
+        set((s) =>
+          s.overview
+            ? { overview: { ...s.overview, defaults: { ...s.overview.defaults, [feature]: prev } } }
+            : {}
+        )
+      throw err
+    }
+  }
+}))

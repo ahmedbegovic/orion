@@ -21,6 +21,7 @@ class Job:
     detail: str = ""
     error: Optional[str] = None
     result: Optional[Any] = None
+    data: dict[str, Any] = field(default_factory=dict)  # kind-specific live payload (e.g. byte counters)
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
     def public(self) -> dict[str, Any]:
@@ -32,6 +33,7 @@ class Job:
             "detail": self.detail,
             "error": self.error,
             "result": self.result,
+            "data": self.data,
         }
 
 
@@ -44,6 +46,18 @@ class JobRegistry:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def find_running(self, kind: str, **data_match: Any) -> Optional[Job]:
+        """First running job of `kind` whose job.data matches all given keys."""
+        with self._lock:
+            for job in self._jobs.values():
+                if (
+                    job.kind == kind
+                    and job.status == "running"
+                    and all(job.data.get(k) == v for k, v in data_match.items())
+                ):
+                    return job
+        return None
+
     def cancel(self, job_id: str) -> bool:
         job = self.get(job_id)
         if job is None or job.status != "running":
@@ -51,9 +65,9 @@ class JobRegistry:
         job.cancel_event.set()
         return True
 
-    def start(self, kind: str, fn: Callable[[Job], Any]) -> Job:
-        """Run fn(job) in a daemon thread; fn sets progress/detail as it goes."""
-        job = Job(id=uuid.uuid4().hex, kind=kind)
+    def start(self, kind: str, fn: Callable[[Job], Any], data: Optional[dict[str, Any]] = None) -> Job:
+        """Run fn(job) in a daemon thread; fn sets progress/detail/data as it goes."""
+        job = Job(id=uuid.uuid4().hex, kind=kind, data=data or {})
         with self._lock:
             self._jobs[job.id] = job
 

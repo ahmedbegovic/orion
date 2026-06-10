@@ -5,7 +5,11 @@ import { openDatabase, type OrionDatabase } from './services/db'
 import { allocatePort } from './services/ports'
 import { ProcessManager } from './services/process-manager'
 import { ToolsClient } from './services/tools-client'
+import { EngineClient } from './services/engine-client'
+import { RamGuard } from './services/ram-guard'
+import { ModelService } from './services/model-service'
 import { dataDir, sidecarDir, uvBinary, uvEnvFor } from './services/paths'
+import { registerModelsFeature } from './features/models'
 import { attachRouter, handle } from './ipc/router'
 import { broadcast } from './ipc/events'
 
@@ -17,14 +21,18 @@ if (!app.requestSingleInstanceLock()) {
 
 let win: BrowserWindow | null = null
 let db: OrionDatabase | null = null
+let modelService: ModelService | null = null
 
 const processManager = new ProcessManager((snapshot) =>
   broadcast({ type: 'system.processState', process: snapshot })
 )
 
-const ports = { tools: 0 }
+const ports = { tools: 0, engine: 0 }
 
 export const toolsClient = new ToolsClient(() => `http://127.0.0.1:${ports.tools}`)
+export const engineClient = new EngineClient(() => `http://127.0.0.1:${ports.engine}`)
+
+const ramGuard = new RamGuard()
 
 async function createWindow(): Promise<void> {
   win = new BrowserWindow({
@@ -104,11 +112,24 @@ app.whenReady().then(async () => {
 
   registerSidecars()
   registerIpcHandlers()
+
+  modelService = new ModelService({
+    db,
+    tools: toolsClient,
+    engine: engineClient,
+    ramGuard,
+    processManager,
+    getEnginePort: () => ports.engine,
+    broadcast
+  })
+  registerModelsFeature({ processManager, modelService, ports })
+
   attachRouter()
 
   await createWindow()
 
   void processManager.get('tools')?.start()
+  void modelService.init()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow()
@@ -126,6 +147,7 @@ app.on('before-quit', (event) => {
   quitting = true
   void (async () => {
     try {
+      modelService?.dispose()
       await processManager.shutdown()
       db?.close()
     } catch (err) {
