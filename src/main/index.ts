@@ -32,6 +32,7 @@ import { renderInstructionsText } from './services/opencode-config'
 import { OpencodePool } from './services/opencode-pool'
 import { AgentService } from './services/agent-service'
 import { WorkspaceFs } from './services/workspace-fs'
+import { GitService } from './services/git-service'
 import { TermService } from './services/term-service'
 import { registerModelsFeature } from './features/models'
 import { registerSettingsFeature } from './features/settings'
@@ -41,6 +42,7 @@ import { registerMcpFeature } from './features/mcp'
 import { registerSkillsFeature } from './features/skills'
 import { registerAgentFeature } from './features/agent'
 import { registerCodeFeature } from './features/code'
+import { registerGitFeature } from './features/git'
 import { registerResearchFeature } from './features/research'
 import { registerNewsFeature } from './features/news'
 import { attachRouter, handle } from './ipc/router'
@@ -342,6 +344,8 @@ app.whenReady().then(async () => {
   workspaceFs = new WorkspaceFs({ broadcast })
   termService = new TermService({ broadcast })
   registerCodeFeature({ db, workspaceFs, terms: termService })
+  const ws = workspaceFs
+  registerGitFeature(new GitService({ isOpenRoot: (root) => ws.isOpenRoot(root), broadcast }))
 
   attachRouter()
 

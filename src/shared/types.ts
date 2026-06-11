@@ -280,6 +280,37 @@ export interface WorkspaceEntry {
   kind: 'file' | 'dir'
 }
 
+// ---------------------------------------------------------------------------
+// Git (P2)
+// ---------------------------------------------------------------------------
+
+export interface GitFileStatus {
+  /** Workspace-relative, '/'-separated. */
+  path: string
+  /** Porcelain v2 X column ('.', 'M', 'A', 'D', 'R', 'U'…). */
+  indexState: string
+  /** Porcelain v2 Y column. */
+  worktreeState: string
+  untracked: boolean
+  renamedFrom: string | null
+}
+
+export interface GitStatus {
+  repo: boolean
+  /** Null when detached (or repo=false). */
+  branch: string | null
+  ahead: number
+  behind: number
+  files: GitFileStatus[]
+}
+
+export interface GitLogEntry {
+  hash: string
+  author: string
+  timeMs: number
+  subject: string
+}
+
 export type ResearchMode = 'standard' | 'heavy'
 export type ResearchStatus =
   | 'planning'

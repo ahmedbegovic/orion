@@ -274,6 +274,35 @@ export const workspaceEntrySchema = z.object({
   kind: z.enum(['file', 'dir'])
 })
 
+// --- git (P2) ----------------------------------------------------------------
+
+export const gitFileStatusSchema = z.object({
+  /** Workspace-relative, '/'-separated. */
+  path: z.string(),
+  /** Porcelain v2 X column ('.', 'M', 'A', 'D', 'R', 'U'…). */
+  indexState: z.string(),
+  /** Porcelain v2 Y column. */
+  worktreeState: z.string(),
+  untracked: z.boolean(),
+  renamedFrom: z.string().nullable()
+})
+
+export const gitStatusSchema = z.object({
+  repo: z.boolean(),
+  /** Null when detached (or repo=false). */
+  branch: z.string().nullable(),
+  ahead: z.number(),
+  behind: z.number(),
+  files: z.array(gitFileStatusSchema)
+})
+
+export const gitLogEntrySchema = z.object({
+  hash: z.string(),
+  author: z.string(),
+  timeMs: z.number(),
+  subject: z.string()
+})
+
 export const researchModeSchema = z.enum(['standard', 'heavy'])
 export const researchStatusSchema = z.enum([
   'planning',
@@ -712,6 +741,53 @@ export const contract = {
     output: z.object({ ok: z.boolean() })
   },
 
+  // --- git (jailed to open workspaces) ----------------------------------------------
+  'git.status': {
+    input: z.object({ root: z.string() }),
+    output: gitStatusSchema
+  },
+  'git.stage': {
+    input: z.object({ root: z.string(), paths: z.array(z.string()) }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'git.unstage': {
+    input: z.object({ root: z.string(), paths: z.array(z.string()) }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'git.discard': {
+    /** Tracked: restore from index; untracked: macOS Trash (recoverable). */
+    input: z.object({ root: z.string(), paths: z.array(z.string()) }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'git.commit': {
+    input: z.object({ root: z.string(), message: z.string() }),
+    output: z.object({ hash: z.string() })
+  },
+  'git.log': {
+    /** path set = per-file history (--follow). */
+    input: z.object({ root: z.string(), path: z.string().optional(), limit: z.number().optional() }),
+    output: z.object({ entries: z.array(gitLogEntrySchema) })
+  },
+  'git.show': {
+    /** File content at a ref; null for binaries and >2MB payloads. */
+    input: z.object({ root: z.string(), ref: z.string(), path: z.string() }),
+    output: z.object({ content: z.string().nullable() })
+  },
+  'git.diffFile': {
+    /** Both Monaco diff sides. staged: HEAD→index; else index→worktree. */
+    input: z.object({ root: z.string(), path: z.string(), staged: z.boolean() }),
+    output: z.object({ original: z.string(), modified: z.string() })
+  },
+  'git.init': {
+    input: z.object({ root: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'git.ignoreAdd': {
+    /** Appends to .gitignore, deduped. */
+    input: z.object({ root: z.string(), pattern: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+
   // --- research --------------------------------------------------------------------
   'research.start': {
     input: z.object({
@@ -937,6 +1013,11 @@ export const orionEventSchema = z.discriminatedUnion('type', [
     type: z.literal('code.fsChanged'),
     root: z.string(),
     paths: z.array(z.string())
+  }),
+  z.object({
+    /** A git mutation ran for this workspace — refetch git.status. */
+    type: z.literal('git.changed'),
+    root: z.string()
   }),
   z.object({
     /** A research step was created or changed state. */

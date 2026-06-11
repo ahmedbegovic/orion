@@ -21,6 +21,19 @@ export interface CodeClipboard {
   op: 'cut' | 'copy'
 }
 
+/** Which panel the left aside shows. */
+export type AsideView = 'files' | 'changes' | 'history'
+
+/** A side-by-side diff replacing the editor until closed. */
+export interface DiffView {
+  /** Workspace-relative file path the diff concerns. */
+  path: string
+  /** Header label, e.g. "staged" or a short commit hash. */
+  label: string
+  original: string
+  modified: string
+}
+
 function parentDir(path: string): string {
   const i = path.lastIndexOf('/')
   return i === -1 ? '' : path.slice(0, i)
@@ -123,6 +136,15 @@ interface CodeStore {
   /** code.copy next to the source with the next free ' copy' name. */
   duplicateEntry: (path: string) => Promise<void>
   reveal: (path: string) => Promise<void>
+  asideView: AsideView
+  setAsideView: (view: AsideView) => void
+  /** File whose log the History panel shows; null = none picked yet. */
+  historyPath: string | null
+  openHistory: (path: string) => void
+  /** Non-null replaces the editor with a side-by-side Monaco diff. */
+  diffView: DiffView | null
+  openDiff: (diff: DiffView) => void
+  closeDiff: () => void
 }
 
 export const useCodeStore = create<CodeStore>((set, get) => ({
@@ -491,7 +513,15 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     const root = get().root
     if (!root) return
     await call('code.reveal', { root, path })
-  }
+  },
+
+  asideView: 'files',
+  setAsideView: (view) => set({ asideView: view }),
+  historyPath: null,
+  openHistory: (path) => set({ asideView: 'history', historyPath: path }),
+  diffView: null,
+  openDiff: (diff) => set({ diffView: diff }),
+  closeDiff: () => set({ diffView: null })
 }))
 
 /** Paste availability for menu builders that run outside a react subscription. */

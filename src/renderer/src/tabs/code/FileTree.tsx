@@ -1,10 +1,13 @@
-import { createContext, useContext, useRef, useState, type MouseEvent } from 'react'
+import { createContext, useContext, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { ChevronRight } from 'lucide-react'
 import type { WorkspaceEntry } from '@shared/types'
-import { hasClipboard, useCodeStore } from '@/stores/code'
+import { hasClipboard, useCodeStore, type AsideView } from '@/stores/code'
+import { buildDecorations, useGitStore, type PathDecoration } from '@/stores/git'
 import { pushToast, toastError } from '@/stores/toasts'
 import ConfirmDialog from '@/components/ConfirmDialog'
 import TreeContextMenu, { type MenuEntry } from './TreeContextMenu'
+import ChangesPanel from './ChangesPanel'
+import HistoryPanel from './HistoryPanel'
 
 const INDENT_PX = 12
 const BASE_PAD_PX = 8
@@ -20,14 +23,24 @@ interface TreeUi {
   editing: Editing | null
   commitEditing: (name: string) => Promise<void>
   cancelEditing: () => void
+  /** Git decorations: file color by state, dot for dirs with dirty descendants. */
+  decorations: Map<string, PathDecoration>
+  dirtyDirs: Set<string>
 }
 
 const TreeUiContext = createContext<TreeUi>({
   openMenu: () => {},
   editing: null,
   commitEditing: async () => {},
-  cancelEditing: () => {}
+  cancelEditing: () => {},
+  decorations: new Map(),
+  dirtyDirs: new Set()
 })
+
+const DECORATION_CLASS: Record<Exclude<PathDecoration, null>, string> = {
+  modified: 'text-amber-400',
+  added: 'text-emerald-400'
+}
 
 function InlineNameInput({ initial }: { initial: string }) {
   const { commitEditing, cancelEditing } = useContext(TreeUiContext)
@@ -68,7 +81,7 @@ function InlineNameInput({ initial }: { initial: string }) {
 }
 
 function TreeNode({ entry, depth }: { entry: WorkspaceEntry; depth: number }) {
-  const { openMenu, editing } = useContext(TreeUiContext)
+  const { openMenu, editing, decorations, dirtyDirs } = useContext(TreeUiContext)
   const expanded = useCodeStore((s) => Boolean(s.expanded[entry.path]))
   const active = useCodeStore((s) => s.activePath === entry.path)
   const cutPending = useCodeStore(
@@ -79,8 +92,10 @@ function TreeNode({ entry, depth }: { entry: WorkspaceEntry; depth: number }) {
 
   const renaming = editing?.kind === 'rename' && editing.path === entry.path
   const cutClass = cutPending ? ' opacity-40' : ''
+  const decoration = decorations.get(entry.path) ?? null
 
   if (entry.kind === 'dir') {
+    const dirty = dirtyDirs.has(entry.path)
     return (
       <>
         {renaming ? (
@@ -107,6 +122,12 @@ function TreeNode({ entry, depth }: { entry: WorkspaceEntry; depth: number }) {
               className={`shrink-0 text-zinc-600 transition-transform ${expanded ? 'rotate-90' : ''}`}
             />
             <span className="truncate">{entry.name}</span>
+            {dirty && (
+              <span
+                title="Contains changes"
+                className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400/70"
+              />
+            )}
           </button>
         )}
         {expanded && <TreeLevel dir={entry.path} depth={depth + 1} />}
@@ -123,6 +144,9 @@ function TreeNode({ entry, depth }: { entry: WorkspaceEntry; depth: number }) {
       </div>
     )
   }
+  const fileColor = decoration
+    ? DECORATION_CLASS[decoration]
+    : 'text-zinc-400 hover:text-zinc-200'
   return (
     <button
       onClick={() => void openFile(entry.path).catch(toastError)}
@@ -130,7 +154,7 @@ function TreeNode({ entry, depth }: { entry: WorkspaceEntry; depth: number }) {
       title={entry.path}
       style={{ paddingLeft: BASE_PAD_PX + FILE_EXTRA_PAD_PX + depth * INDENT_PX }}
       className={`flex w-full items-center py-[3px] pr-2 text-left text-[12px] ${
-        active ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+        active ? `bg-zinc-800 ${decoration ? DECORATION_CLASS[decoration] : 'text-zinc-100'}` : `${fileColor} hover:bg-zinc-900`
       }${cutClass}`}
     >
       <span className="truncate">{entry.name}</span>
@@ -183,6 +207,17 @@ export default function FileTree() {
   )
   const [editing, setEditing] = useState<Editing | null>(null)
   const [trashTarget, setTrashTarget] = useState<WorkspaceEntry | null>(null)
+  const root = useCodeStore((s) => s.root)
+  const asideView = useCodeStore((s) => s.asideView)
+  const setAsideView = useCodeStore((s) => s.setAsideView)
+  const openHistory = useCodeStore((s) => s.openHistory)
+  const historyPath = useCodeStore((s) => s.historyPath)
+  const gitStatus = useGitStore((s) => (root ? s.statusByRoot[root] : undefined))
+  const { byPath: decorations, dirtyDirs } = useMemo(
+    () => buildDecorations(gitStatus),
+    [gitStatus]
+  )
+  const changeCount = gitStatus?.repo ? gitStatus.files.length : 0
 
   const openMenu = (e: MouseEvent, entry: WorkspaceEntry | null): void => {
     e.preventDefault()
@@ -254,6 +289,12 @@ export default function FileTree() {
       'separator',
       { label: 'Copy Path', onClick: () => void navigator.clipboard.writeText(entry.path) },
       { label: 'Reveal in Finder', onClick: () => void s.reveal(entry.path).catch(toastError) },
+      ...(gitStatus?.repo && !isDir
+        ? ([
+            'separator',
+            { label: 'View History', onClick: () => openHistory(entry.path) }
+          ] satisfies MenuEntry[])
+        : []),
       'separator',
       {
         label: 'Delete',
@@ -263,22 +304,53 @@ export default function FileTree() {
     ]
   }
 
-  const ui: TreeUi = { openMenu, editing, commitEditing, cancelEditing: () => setEditing(null) }
+  const ui: TreeUi = {
+    openMenu,
+    editing,
+    commitEditing,
+    cancelEditing: () => setEditing(null),
+    decorations,
+    dirtyDirs
+  }
+
+  const tabs: Array<{ id: AsideView; label: string }> = [
+    { id: 'files', label: 'Files' },
+    { id: 'changes', label: changeCount > 0 ? `Changes · ${changeCount}` : 'Changes' },
+    ...(historyPath !== null ? [{ id: 'history' as const, label: 'History' }] : [])
+  ]
 
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950/50">
       {/* In-band header: h-12 row shares the hiddenInset titlebar band and drags the window. */}
-      <div className="drag-region flex h-12 shrink-0 items-center px-3 text-[10.5px] font-semibold uppercase tracking-wider text-zinc-600">
-        Files
+      <div className="drag-region flex h-12 shrink-0 items-center gap-1 px-2">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setAsideView(tab.id)}
+            className={`no-drag rounded-md px-2 py-1 text-[10.5px] font-semibold uppercase tracking-wider ${
+              asideView === tab.id
+                ? 'bg-zinc-800 text-zinc-200'
+                : 'text-zinc-600 hover:text-zinc-400'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
-      <div
-        className="no-drag min-h-0 flex-1 overflow-y-auto pb-2"
-        onContextMenu={(e) => openMenu(e, null)}
-      >
-        <TreeUiContext.Provider value={ui}>
-          <TreeLevel dir="" depth={0} />
-        </TreeUiContext.Provider>
-      </div>
+      {asideView === 'changes' ? (
+        <ChangesPanel />
+      ) : asideView === 'history' ? (
+        <HistoryPanel />
+      ) : (
+        <div
+          className="no-drag min-h-0 flex-1 overflow-y-auto pb-2"
+          onContextMenu={(e) => openMenu(e, null)}
+        >
+          <TreeUiContext.Provider value={ui}>
+            <TreeLevel dir="" depth={0} />
+          </TreeUiContext.Provider>
+        </div>
+      )}
       {menu && (
         <TreeContextMenu
           x={menu.x}

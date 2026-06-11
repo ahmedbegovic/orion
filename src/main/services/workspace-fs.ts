@@ -68,6 +68,11 @@ export class WorkspaceFs {
     await watched.watcher.close()
   }
 
+  /** True for roots the renderer has opened — the git service's jail check. */
+  isOpenRoot(root: string): boolean {
+    return this.watchers.has(resolve(root))
+  }
+
   listDir(root: string, dir: string): WorkspaceEntry[] {
     const { abs, rel } = this.jailed(root, dir)
     const entries = readdirSync(abs, { withFileTypes: true })

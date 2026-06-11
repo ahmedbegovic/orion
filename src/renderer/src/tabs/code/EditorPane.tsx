@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as monaco from 'monaco-editor'
-import Editor, { type OnMount } from '@monaco-editor/react'
-import { FileCode2, TriangleAlert, X } from 'lucide-react'
+import Editor, { DiffEditor, type OnMount } from '@monaco-editor/react'
+import { FileCode2, GitCompareArrows, TriangleAlert, X } from 'lucide-react'
 import { useCodeStore, type OpenFile } from '@/stores/code'
 import { toastError } from '@/stores/toasts'
 import ConfirmDialog from '@/components/ConfirmDialog'
@@ -57,6 +57,8 @@ export default function EditorPane() {
   const save = useCodeStore((s) => s.save)
   const reloadFromDisk = useCodeStore((s) => s.reloadFromDisk)
   const closeFile = useCodeStore((s) => s.closeFile)
+  const diffView = useCodeStore((s) => s.diffView)
+  const closeDiff = useCodeStore((s) => s.closeDiff)
   const [closeTarget, setCloseTarget] = useState<OpenFile | null>(null)
 
   const activeFile = openFiles.find((f) => f.path === activePath)
@@ -157,6 +159,42 @@ export default function EditorPane() {
         </div>
       )}
 
+      {/* A diff takes over the editor surface until dismissed. */}
+      {diffView ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="no-drag flex shrink-0 items-center gap-2 border-b border-zinc-800/80 bg-zinc-950/30 px-3 py-1.5 text-[12px]">
+            <GitCompareArrows size={13} className="shrink-0 text-zinc-500" />
+            <span className="min-w-0 truncate text-zinc-300">{diffView.path}</span>
+            <span className="shrink-0 rounded-full border border-zinc-800 px-1.5 text-[10px] text-zinc-500">
+              {diffView.label}
+            </span>
+            <button
+              onClick={closeDiff}
+              title="Close diff"
+              className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-700 hover:text-zinc-200"
+            >
+              <X size={13} />
+            </button>
+          </div>
+          <div className="min-h-0 flex-1">
+            <DiffEditor
+              original={diffView.original}
+              modified={diffView.modified}
+              language={languageFor(diffView.path)}
+              theme="vs-dark"
+              options={{
+                readOnly: true,
+                renderSideBySide: true,
+                automaticLayout: true,
+                fontSize: 12.5,
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false
+              }}
+              loading={<span className="text-[12px] text-zinc-600">Loading diff…</span>}
+            />
+          </div>
+        </div>
+      ) : (
       <div className="min-h-0 flex-1">
         {activeFile ? (
           <Editor
@@ -184,6 +222,7 @@ export default function EditorPane() {
           </div>
         )}
       </div>
+      )}
 
       <ConfirmDialog
         open={closeTarget !== null}
