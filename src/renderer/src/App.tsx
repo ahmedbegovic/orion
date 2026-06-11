@@ -54,7 +54,8 @@ export default function App() {
     <div className="flex h-full flex-col">
       <div className="flex min-h-0 flex-1">
         {/* Left rail */}
-        <nav className="flex w-[76px] shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950">
+        {/* 81px keeps the right border clear of the Tahoe-size traffic lights. */}
+        <nav className="flex w-[81px] shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950">
           <div className="drag-region h-12 shrink-0" />
           <div className="flex flex-1 flex-col items-center gap-1 px-2">
             {TABS.map(({ id, label, icon: Icon }) => {
