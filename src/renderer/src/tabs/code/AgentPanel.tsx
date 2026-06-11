@@ -177,16 +177,18 @@ export default function AgentPanel({ root }: Props) {
 
   if (collapsed) {
     return (
-      // pt-12 clears the hiddenInset titlebar band (h-12) — a button
-      // underneath it never receives clicks.
-      <aside className="flex w-9 shrink-0 flex-col items-center gap-2 border-l border-zinc-800/80 bg-zinc-950/50 pb-2 pt-12">
-        <button
-          onClick={() => setCollapsed(false)}
-          title="Show agent panel"
-          className="no-drag rounded-md p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-        >
-          <ChevronsLeft size={14} />
-        </button>
+      // The expand button sits inside the h-12 drag band so it lines up with
+      // the in-band headers; no-drag keeps it clickable.
+      <aside className="flex w-9 shrink-0 flex-col items-center gap-2 border-l border-zinc-800/80 bg-zinc-950/50 pb-2">
+        <div className="drag-region flex h-12 w-full shrink-0 items-center justify-center">
+          <button
+            onClick={() => setCollapsed(false)}
+            title="Show agent panel"
+            className="no-drag rounded-md p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+          >
+            <ChevronsLeft size={14} />
+          </button>
+        </div>
         {ask && (
           <span
             title="The agent is waiting for permission"
@@ -199,10 +201,8 @@ export default function AgentPanel({ root }: Props) {
 
   return (
     <aside className="flex w-96 shrink-0 flex-col border-l border-zinc-800/80 bg-zinc-950/50">
-      {/* Clears the hiddenInset titlebar band (h-12) — header buttons
-          underneath it never receive clicks. */}
-      <div className="h-12 shrink-0" />
-      <header className="flex shrink-0 items-center gap-1 border-b border-zinc-800/80 px-2 py-1.5">
+      {/* In-band header: h-12 row shares the hiddenInset titlebar band and drags the window. */}
+      <header className="drag-region flex h-12 shrink-0 items-center gap-1 border-b border-zinc-800/80 px-2">
         <button
           onClick={() => setCollapsed(true)}
           title="Hide agent panel"
@@ -215,7 +215,7 @@ export default function AgentPanel({ root }: Props) {
             value={session.id}
             onChange={(e) => setSelectedId(e.target.value)}
             title="Session"
-            className="min-w-0 flex-1 truncate rounded-md border border-zinc-800 bg-zinc-900 px-1.5 py-1 text-[11.5px] text-zinc-300 outline-none focus:border-zinc-600"
+            className="no-drag min-w-0 flex-1 truncate rounded-md border border-zinc-800 bg-zinc-900 px-1.5 py-1 text-[11.5px] text-zinc-300 outline-none focus:border-zinc-600"
           >
             {sessions.map((x) => (
               <option key={x.id} value={x.id}>

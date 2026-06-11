@@ -17,12 +17,14 @@ export default function ModelsTab() {
 
   return (
     <div className="h-full overflow-y-auto">
-      {/* pt-12 clears the hiddenInset titlebar band (h-12, traffic lights centered). */}
-      <div className="mx-auto flex max-w-5xl flex-col gap-8 px-8 pb-12 pt-12">
-        <div className="flex items-center justify-between gap-6">
-          <h1 className="text-xl font-semibold text-zinc-100">Models</h1>
+      {/* In-band sticky header: h-12 row shares the hiddenInset titlebar band and drags the window. */}
+      <header className="drag-region sticky top-0 z-10 border-b border-zinc-800/80 bg-[#101013]">
+        <div className="mx-auto flex h-12 max-w-5xl items-center justify-between gap-6 px-8">
+          <h1 className="text-[13px] font-semibold text-zinc-100">Models</h1>
           {overview && <RamMeter ram={overview.ram} />}
         </div>
+      </header>
+      <div className="mx-auto flex max-w-5xl flex-col gap-8 px-8 pb-12 pt-6">
         {overview ? (
           <>
             <TierTable overview={overview} />

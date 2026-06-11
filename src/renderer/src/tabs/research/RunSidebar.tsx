@@ -17,8 +17,12 @@ export default function RunSidebar() {
 
   return (
     <aside className="flex w-72 shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950/50">
-      {/* pt-12 clears the hiddenInset titlebar band (h-12, traffic lights centered). */}
-      <div className="no-drag shrink-0 px-3 pb-3 pt-12">
+      {/* In-band header: h-12 row shares the hiddenInset titlebar band and drags the window.
+          The research form is taller than the band, so only its label lives in-band. */}
+      <div className="drag-region flex h-12 shrink-0 items-center px-3 text-[10.5px] font-semibold uppercase tracking-wider text-zinc-600">
+        New research
+      </div>
+      <div className="no-drag shrink-0 px-3 pb-3">
         <NewResearch />
       </div>
 

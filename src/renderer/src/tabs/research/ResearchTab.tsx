@@ -26,7 +26,8 @@ export default function ResearchTab() {
       {run ? (
         <RunView key={activeId} run={run} />
       ) : (
-        <div className="flex min-w-0 flex-1 flex-col items-center justify-center gap-4">
+        <div className="relative flex min-w-0 flex-1 flex-col items-center justify-center gap-4">
+          <div className="drag-region absolute inset-x-0 top-0 h-12" />
           <Telescope size={32} strokeWidth={1.5} className="text-zinc-700" />
           <div className="text-center">
             <h2 className="text-[14px] font-medium text-zinc-300">No research selected</h2>
