@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AgentSessionMeta, AgentTab, SkillMeta, Tier } from '@shared/types'
+import type { AgentSessionMeta, AgentTab, PermissionMode, SkillMeta, Tier } from '@shared/types'
 import { call, onEvent } from '@/lib/ipc'
 import { pushToast } from '@/stores/toasts'
 
@@ -188,6 +188,9 @@ interface AgentStore {
   /** Snapshot-fetch a session's timeline without touching activeId. */
   load: (sessionId: string) => Promise<void>
   prompt: (sessionId: string, text: string, tier?: Tier) => Promise<void>
+  /** Per-session permission posture; sent with every prompt. */
+  modeBySession: Record<string, PermissionMode>
+  setMode: (sessionId: string, mode: PermissionMode) => void
   abort: (sessionId: string) => Promise<void>
   permissionReply: (
     sessionId: string,
@@ -418,6 +421,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }))
   },
 
+  modeBySession: {},
+
+  setMode: (sessionId, mode) =>
+    set((s) => ({ modeBySession: { ...s.modeBySession, [sessionId]: mode } })),
+
   prompt: async (sessionId, text, tier) => {
     // Reject rather than toast: the composer restores its draft from the rejection.
     if (get().busyBySession[sessionId])
@@ -439,7 +447,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       )
     }))
     try {
-      await call('agent.prompt', { sessionId, text, tier })
+      await call('agent.prompt', {
+        sessionId,
+        text,
+        tier,
+        mode: get().modeBySession[sessionId] ?? 'normal'
+      })
     } catch (err) {
       set((s) => ({
         busyBySession: without(s.busyBySession, sessionId),

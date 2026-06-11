@@ -12,8 +12,8 @@ export function registerAgentFeature(agent: AgentService): void {
 
   handle('agent.get', ({ sessionId }) => agent.get(sessionId))
 
-  handle('agent.prompt', async ({ sessionId, text, tier }) => {
-    await agent.prompt(sessionId, text, tier)
+  handle('agent.prompt', async ({ sessionId, text, tier, mode }) => {
+    await agent.prompt(sessionId, text, tier, mode)
     return { ok: true }
   })
 

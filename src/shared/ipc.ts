@@ -257,6 +257,9 @@ export const skillMetaSchema = z.object({
 /** Which UI surface owns an opencode session. */
 export const agentTabSchema = z.enum(['agent', 'code'])
 
+/** Per-prompt permission posture, mapped to opencode agents main-side. */
+export const permissionModeSchema = z.enum(['normal', 'plan', 'acceptEdits', 'auto'])
+
 export const agentSessionMetaSchema = z.object({
   id: z.string(),
   tab: agentTabSchema,
@@ -639,7 +642,12 @@ export const contract = {
   },
   'agent.prompt': {
     /** Fire-and-forget; progress streams via agent.event. */
-    input: z.object({ sessionId: z.string(), text: z.string(), tier: tierSchema.optional() }),
+    input: z.object({
+      sessionId: z.string(),
+      text: z.string(),
+      tier: tierSchema.optional(),
+      mode: permissionModeSchema.optional()
+    }),
     output: z.object({ ok: z.boolean() })
   },
   'agent.abort': {

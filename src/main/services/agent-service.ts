@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { OrionEvent } from '@shared/ipc'
-import type { AgentSessionMeta, AgentTab, Tier } from '@shared/types'
+import type { AgentSessionMeta, AgentTab, PermissionMode, Tier } from '@shared/types'
 import { TIER_ORDER } from '@shared/model-tiers'
 import type { OrionDatabase } from './db'
 import { engineModelId } from './engine-client'
@@ -61,6 +61,8 @@ const REQUEST_TIMEOUT_MS = 30_000
 export class AgentService {
   private readonly log = scopedLogger('agent')
   private readonly memoryDir = join(dataDir(), 'memory')
+  /** Last prompt's permission mode per session — drives the ask auto-replies. */
+  private readonly modeBySession = new Map<string, PermissionMode>()
 
   constructor(private readonly deps: AgentServiceDeps) {
     deps.pool.onEvent((directory, event) => this.onPoolEvent(directory, event))
@@ -136,15 +138,16 @@ export class AgentService {
    * orion.promptFailed agent.event (the renderer's handler owns the toast)
    * instead of failing the IPC call.
    */
-  async prompt(sessionId: string, text: string, tier?: Tier): Promise<void> {
+  async prompt(sessionId: string, text: string, tier?: Tier, mode?: PermissionMode): Promise<void> {
     const row = this.row(sessionId)
     const modelId = this.resolveModel(tier, row.tab)
     const { baseUrl } = await this.deps.pool.ensureServer(row.directory)
     this.deps.pool.touch(row.directory)
+    this.modeBySession.set(row.id, mode ?? 'normal')
     this.deps.db
       .prepare('UPDATE agent_sessions SET last_used_at = ? WHERE id = ?')
       .run(Date.now(), row.id)
-    void this.firePrompt(row, baseUrl, modelId, text).catch((err: unknown) => {
+    void this.firePrompt(row, baseUrl, modelId, text, mode).catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err)
       this.log.warn(`prompt failed for session ${row.id}: ${message}`)
       this.deps.broadcast({
@@ -276,10 +279,14 @@ export class AgentService {
     row: AgentSessionRow,
     baseUrl: string,
     modelId: string,
-    text: string
+    text: string,
+    mode?: PermissionMode
   ): Promise<void> {
     const body = {
       model: { providerID: 'orion', modelID: modelId },
+      // 'plan' is opencode's built-in read-only agent; the other two are ours
+      // (opencode-config.ts). Normal omits the field = top-level permissions.
+      ...(mode && mode !== 'normal' ? { agent: mode } : {}),
       parts: [{ type: 'text', text }]
     }
     const path = (): string => `/session/${row.opencode_session_id}/prompt_async`
@@ -346,6 +353,26 @@ export class AgentService {
     // The id guard excludes 'permission.replied' (whose properties carry no
     // id), which would otherwise enqueue a ghost ask after every reply.
     if (typeof type === 'string' && type.includes('permission') && typeof props?.id === 'string') {
+      // Mode auto-replies (belt and braces over the per-agent config): a
+      // handled ask never reaches the renderer.
+      const mode = this.modeBySession.get(row.id) ?? 'normal'
+      const kind = String(props.permission ?? props.type ?? '')
+      const isEdit = kind.includes('edit')
+      const autoReply: 'once' | 'reject' | null =
+        mode === 'auto'
+          ? 'once'
+          : mode === 'acceptEdits' && isEdit
+            ? 'once'
+            : mode === 'plan' && isEdit
+              ? 'reject'
+              : null
+      if (autoReply) {
+        this.log.info(`${mode} mode auto-${autoReply === 'once' ? 'allows' : 'rejects'} ${kind || 'ask'} ${props.id}`)
+        void this.permissionReply(row.id, props.id, autoReply).catch((err) => {
+          this.log.warn(`auto-reply failed: ${err instanceof Error ? err.message : err}`)
+        })
+        return
+      }
       this.deps.broadcast({
         type: 'agent.permissionRequest',
         sessionId: row.id,

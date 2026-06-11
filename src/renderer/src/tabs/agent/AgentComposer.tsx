@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { SendHorizontal, Square } from 'lucide-react'
 import { FEATURE_DEFAULTS, TIER_LABELS, TIER_ORDER } from '@shared/model-tiers'
-import type { Tier } from '@shared/types'
+import type { PermissionMode, Tier } from '@shared/types'
 import { useAgentStore } from '@/stores/agent'
 import { useModelsStore } from '@/stores/models'
 import { toastError } from '@/stores/toasts'
@@ -9,6 +9,14 @@ import SkillPicker from './SkillPicker'
 import { useSlashSkills } from './useSlashSkills'
 
 const MAX_TEXTAREA_PX = 180
+
+export const MODE_LABELS: Record<PermissionMode, string> = {
+  normal: 'Normal',
+  plan: 'Plan',
+  acceptEdits: 'Accept Edits',
+  auto: 'Auto'
+}
+export const MODE_ORDER: PermissionMode[] = ['normal', 'plan', 'acceptEdits', 'auto']
 
 interface Props {
   sessionId: string
@@ -18,6 +26,8 @@ export default function AgentComposer({ sessionId }: Props) {
   const prompt = useAgentStore((s) => s.prompt)
   const abort = useAgentStore((s) => s.abort)
   const busy = useAgentStore((s) => Boolean(s.busyBySession[sessionId]))
+  const mode = useAgentStore((s) => s.modeBySession[sessionId] ?? 'normal')
+  const setMode = useAgentStore((s) => s.setMode)
 
   const [text, setText] = useState('')
   // null = untouched: main then resolves the user's persisted agent default.
@@ -86,6 +96,23 @@ export default function AgentComposer({ sessionId }: Props) {
               {TIER_ORDER.map((t) => (
                 <option key={t} value={t}>
                   {TIER_LABELS[t]}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={mode}
+              onChange={(e) => setMode(sessionId, e.target.value as PermissionMode)}
+              title="Permission mode"
+              className={`rounded-md border px-1.5 py-1 text-[11px] outline-none focus:border-zinc-600 ${
+                mode === 'auto'
+                  ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+                  : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              {MODE_ORDER.map((m) => (
+                <option key={m} value={m}>
+                  {MODE_LABELS[m]}
                 </option>
               ))}
             </select>

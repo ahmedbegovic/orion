@@ -111,7 +111,26 @@ export function writeOpencodeConfig(opts: OpencodeConfigOptions): string {
       }
     },
     instructions: [join(dataDir(), 'memory', '*.md')],
-    permission: { edit: 'ask', bash: 'ask', webfetch: 'allow' }
+    // Top-level = Normal mode. The named agents below carry the other
+    // permission modes; agent-service picks one per prompt (P2-13).
+    permission: { edit: 'ask', bash: 'ask', webfetch: 'allow' },
+    agent: {
+      // Built-in plan agent — pin edit deny explicitly (belt and braces;
+      // agent-service also auto-rejects edit asks in plan mode).
+      plan: {
+        permission: { edit: 'deny', bash: 'ask', webfetch: 'allow' }
+      },
+      acceptEdits: {
+        mode: 'primary',
+        description: 'Edits land without asking; shell commands still ask.',
+        permission: { edit: 'allow', bash: 'ask', webfetch: 'allow' }
+      },
+      auto: {
+        mode: 'primary',
+        description: 'Everything pre-approved — edits, shell and web.',
+        permission: { edit: 'allow', bash: 'allow', webfetch: 'allow' }
+      }
+    }
   }
   const path = opencodeConfigPath()
   mkdirSync(dirname(path), { recursive: true })

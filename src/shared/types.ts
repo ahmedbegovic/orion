@@ -311,6 +311,9 @@ export interface GitLogEntry {
   subject: string
 }
 
+/** Per-prompt permission posture, mapped to opencode agents main-side. */
+export type PermissionMode = 'normal' | 'plan' | 'acceptEdits' | 'auto'
+
 export type ResearchMode = 'standard' | 'heavy'
 export type ResearchStatus =
   | 'planning'
