@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync
 } from 'node:fs'
@@ -179,6 +180,83 @@ export class WorkspaceFs {
   revealEntry(root: string, path: string): void {
     const { abs } = this.jailed(root, path)
     shell.showItemInFolder(abs)
+  }
+
+  /** Context menu's "Open in Default App" — macOS picks the handler. */
+  async openDefault(root: string, path: string): Promise<void> {
+    const { abs } = this.jailed(root, path)
+    const error = await shell.openPath(abs)
+    if (error) throw new Error(error)
+  }
+
+  /** PERMANENT delete (rm -rf) — the UI confirms before calling. */
+  deletePermanent(root: string, path: string): void {
+    const { abs, rel } = this.jailed(root, path)
+    if (rel === '') throw new Error('Refusing to delete the workspace root')
+    if (!existsSync(abs)) throw new Error(`No such file or directory: ${path}`)
+    rmSync(abs, { recursive: true, force: true })
+  }
+
+  /**
+   * Case-insensitive literal search under dir. Skips noise dirs, >2MB files
+   * and binaries; capped (results carry 1-based line/column for Monaco).
+   */
+  searchInFolder(
+    root: string,
+    dir: string,
+    query: string,
+    maxResults = 500
+  ): Array<{ path: string; line: number; column: number; preview: string }> {
+    const start = this.jailed(root, dir)
+    const needle = query.toLowerCase()
+    const results: Array<{ path: string; line: number; column: number; preview: string }> = []
+    if (!needle) return results
+
+    const walk = (dirAbs: string, dirRel: string): void => {
+      if (results.length >= maxResults) return
+      let entries
+      try {
+        entries = readdirSync(dirAbs, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const entry of entries) {
+        if (results.length >= maxResults) return
+        const rel = dirRel ? `${dirRel}/${entry.name}` : entry.name
+        const abs = join(dirAbs, entry.name)
+        if (entry.isDirectory()) {
+          if (!IGNORED_DIRS.has(entry.name)) walk(abs, rel)
+          continue
+        }
+        if (!entry.isFile()) continue
+        try {
+          if (statSync(abs).size > MAX_FILE_BYTES) continue
+        } catch {
+          continue
+        }
+        let text: string
+        try {
+          text = readFileSync(abs, 'utf8')
+        } catch {
+          continue
+        }
+        if (text.includes('\0')) continue // binary
+        if (!text.toLowerCase().includes(needle)) continue
+        const lines = text.split('\n')
+        for (let i = 0; i < lines.length && results.length < maxResults; i++) {
+          const column = lines[i].toLowerCase().indexOf(needle)
+          if (column === -1) continue
+          results.push({
+            path: rel,
+            line: i + 1,
+            column: column + 1,
+            preview: lines[i].trim().slice(0, 200)
+          })
+        }
+      }
+    }
+    walk(start.abs, start.rel)
+    return results
   }
 
   async dispose(): Promise<void> {

@@ -23,7 +23,9 @@ export default function CodeTab() {
   const gitRefresh = useGitStore((s) => s.refresh)
   const initRepo = useGitStore((s) => s.initRepo)
   const gitStatus = useGitStore((s) => (root ? s.statusByRoot[root] : undefined))
-  const [terminalOpen, setTerminalOpen] = useState(true)
+  // Lifted into the store so the context menu's "Open in Terminal" can drive it.
+  const terminalOpen = useCodeStore((s) => s.terminalOpen)
+  const setTerminalOpen = useCodeStore((s) => s.setTerminalOpen)
   const [switchConfirm, setSwitchConfirm] = useState(false)
   const [initConfirm, setInitConfirm] = useState(false)
 
@@ -94,7 +96,7 @@ export default function CodeTab() {
           ) : null}
           <div className="no-drag ml-auto flex shrink-0 items-center gap-0.5">
             <button
-              onClick={() => setTerminalOpen((prev) => !prev)}
+              onClick={() => setTerminalOpen(!terminalOpen)}
               title={terminalOpen ? 'Hide terminal' : 'Show terminal'}
               className={`rounded-md p-1.5 hover:bg-zinc-800 hover:text-zinc-200 ${
                 terminalOpen ? 'text-zinc-300' : 'text-zinc-500'

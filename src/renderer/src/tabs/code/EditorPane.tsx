@@ -59,9 +59,23 @@ export default function EditorPane() {
   const closeFile = useCodeStore((s) => s.closeFile)
   const diffView = useCodeStore((s) => s.diffView)
   const closeDiff = useCodeStore((s) => s.closeDiff)
+  const pendingReveal = useCodeStore((s) => s.pendingReveal)
+  const clearReveal = useCodeStore((s) => s.clearReveal)
   const [closeTarget, setCloseTarget] = useState<OpenFile | null>(null)
+  const editorRef = useRef<Parameters<OnMount>[0] | null>(null)
 
   const activeFile = openFiles.find((f) => f.path === activePath)
+
+  // Find-in-Folder hit: jump the editor to the matched line once it's active.
+  useEffect(() => {
+    if (!pendingReveal || pendingReveal.path !== activePath) return
+    const editor = editorRef.current
+    if (!editor) return
+    editor.revealLineInCenter(pendingReveal.line)
+    editor.setPosition({ lineNumber: pendingReveal.line, column: 1 })
+    editor.focus()
+    clearReveal()
+  }, [pendingReveal, activePath, clearReveal])
 
   // Dispose monaco models of closed files (the Editor never disposes them
   // itself), keyed by root-namespaced URIs so relative paths from different
@@ -82,6 +96,7 @@ export default function EditorPane() {
   }
 
   const handleMount: OnMount = (editor, monaco) => {
+    editorRef.current = editor
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveActiveRef.current())
   }
 

@@ -740,6 +740,35 @@ export const contract = {
     input: z.object({ root: z.string(), path: z.string() }),
     output: z.object({ ok: z.boolean() })
   },
+  'code.openDefault': {
+    /** Open with the macOS default application. */
+    input: z.object({ root: z.string(), path: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'code.deletePermanent': {
+    /** PERMANENT delete (rm -rf) — the UI confirms first. */
+    input: z.object({ root: z.string(), path: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'code.search': {
+    /** Case-insensitive literal search under dir; capped at 500 hits. */
+    input: z.object({
+      root: z.string(),
+      dir: z.string(),
+      query: z.string(),
+      maxResults: z.number().optional()
+    }),
+    output: z.object({
+      results: z.array(
+        z.object({
+          path: z.string(),
+          line: z.number(),
+          column: z.number(),
+          preview: z.string()
+        })
+      )
+    })
+  },
 
   // --- git (jailed to open workspaces) ----------------------------------------------
   'git.status': {

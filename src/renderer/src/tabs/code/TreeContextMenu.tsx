@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 export interface MenuItem {
   label: string
+  /** Right-aligned keyboard hint, e.g. '⌘N'. */
+  shortcut?: string
   /** Red styling for destructive actions. */
   danger?: boolean
   disabled?: boolean
@@ -74,7 +76,7 @@ export default function TreeContextMenu({ x, y, items, onClose }: Props) {
               onClose()
               item.onClick()
             }}
-            className={`block w-full px-3 py-[3px] text-left ${
+            className={`flex w-full items-center gap-4 px-3 py-[3px] text-left ${
               item.disabled
                 ? 'text-zinc-600'
                 : item.danger
@@ -82,7 +84,12 @@ export default function TreeContextMenu({ x, y, items, onClose }: Props) {
                   : 'text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100'
             }`}
           >
-            {item.label}
+            <span className="min-w-0 flex-1 truncate">{item.label}</span>
+            {item.shortcut && (
+              <span className="shrink-0 text-[10.5px] tracking-wide text-zinc-600">
+                {item.shortcut}
+              </span>
+            )}
           </button>
         )
       )}

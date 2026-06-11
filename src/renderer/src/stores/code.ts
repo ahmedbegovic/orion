@@ -22,7 +22,14 @@ export interface CodeClipboard {
 }
 
 /** Which panel the left aside shows. */
-export type AsideView = 'files' | 'changes' | 'history'
+export type AsideView = 'files' | 'changes' | 'history' | 'search'
+
+export interface SearchHit {
+  path: string
+  line: number
+  column: number
+  preview: string
+}
 
 /** A side-by-side diff replacing the editor until closed. */
 export interface DiffView {
@@ -97,6 +104,31 @@ function movedState(
 // in-flight set absorbs the double fire so two writes never race one mtime.
 const savingPaths = new Set<string>()
 
+/** State with every trace of a removed path pruned (shared by trash + permanent delete). */
+function stateWithoutPath(
+  s: Pick<CodeStore, 'openFiles' | 'activePath' | 'childrenByDir' | 'expanded' | 'clipboard'>,
+  path: string
+): Pick<CodeStore, 'openFiles' | 'activePath' | 'childrenByDir' | 'expanded' | 'clipboard'> {
+  const gone = (p: string): boolean => p === path || p.startsWith(path + '/')
+  const activeIndex = s.openFiles.findIndex((f) => f.path === s.activePath)
+  const openFiles = s.openFiles.filter((f) => !gone(f.path))
+  const childrenByDir: Record<string, WorkspaceEntry[]> = {}
+  for (const [dir, entries] of Object.entries(s.childrenByDir)) {
+    if (!gone(dir)) childrenByDir[dir] = entries
+  }
+  const expanded = Object.fromEntries(Object.entries(s.expanded).filter(([dir]) => !gone(dir)))
+  return {
+    openFiles,
+    activePath:
+      s.activePath !== null && gone(s.activePath)
+        ? (openFiles[Math.min(activeIndex, openFiles.length - 1)]?.path ?? null)
+        : s.activePath,
+    childrenByDir,
+    expanded,
+    clipboard: s.clipboard && gone(s.clipboard.path) ? null : s.clipboard
+  }
+}
+
 interface CodeStore {
   /** Absolute path of the open workspace; null = empty state. */
   root: string | null
@@ -113,7 +145,7 @@ interface CodeStore {
   closeWorkspace: () => Promise<void>
   toggleDir: (dir: string) => void
   loadDir: (dir: string) => Promise<void>
-  openFile: (path: string) => Promise<void>
+  openFile: (path: string, opts?: { line?: number }) => Promise<void>
   setActive: (path: string) => void
   edit: (path: string, content: string) => void
   /** overwrite skips the expectedMtime guard — the conflict bar's Overwrite. */
@@ -145,6 +177,30 @@ interface CodeStore {
   diffView: DiffView | null
   openDiff: (diff: DiffView) => void
   closeDiff: () => void
+  /** PERMANENT delete (rm -rf) — callers confirm first. */
+  deletePermanentEntry: (path: string) => Promise<void>
+  openDefault: (path: string) => Promise<void>
+  collapseAll: () => void
+  // Terminal state lives here so the context menu can drive the pane.
+  terminalOpen: boolean
+  setTerminalOpen: (open: boolean) => void
+  termId: string | null
+  setTermId: (id: string | null) => void
+  /** cd command queued for a pty that hasn't spawned yet. */
+  pendingTermCommand: string | null
+  consumePendingTermCommand: () => string | null
+  /** Open the terminal pane and cd the live shell into the dir ('' = root). */
+  openInTerminal: (dirPath: string) => Promise<void>
+  // Find in Folder
+  searchDir: string
+  searchQuery: string
+  searchResults: SearchHit[] | null
+  searching: boolean
+  openSearch: (dir: string) => void
+  runSearch: (query: string) => Promise<void>
+  /** Set when a search hit opens a file — EditorPane reveals then clears. */
+  pendingReveal: { path: string; line: number } | null
+  clearReveal: () => void
 }
 
 export const useCodeStore = create<CodeStore>((set, get) => ({
@@ -298,9 +354,10 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     set((s) => ({ childrenByDir: { ...s.childrenByDir, [dir]: entries } }))
   },
 
-  openFile: async (path) => {
+  openFile: async (path, opts) => {
+    const reveal = opts?.line !== undefined ? { path, line: opts.line } : null
     if (get().openFiles.some((f) => f.path === path)) {
-      set({ activePath: path })
+      set({ activePath: path, ...(reveal ? { pendingReveal: reveal } : {}) })
       return
     }
     const root = get().root
@@ -309,13 +366,14 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     if (get().root !== root) return
     set((s) =>
       s.openFiles.some((f) => f.path === path)
-        ? { activePath: path } // double-click race — keep the first buffer
+        ? { activePath: path, ...(reveal ? { pendingReveal: reveal } : {}) } // double-click race
         : {
             openFiles: [
               ...s.openFiles,
               { path, content, savedMtime: mtime, dirty: false, conflict: false }
             ],
-            activePath: path
+            activePath: path,
+            ...(reveal ? { pendingReveal: reveal } : {})
           }
     )
   },
@@ -438,27 +496,8 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     if (!root) return
     await call('code.delete', { root, path })
     if (get().root !== root) return
-    set((s) => {
-      const gone = (p: string): boolean => p === path || p.startsWith(path + '/')
-      // Trashed files are recoverable — buffers drop without a dirty confirm.
-      const activeIndex = s.openFiles.findIndex((f) => f.path === s.activePath)
-      const openFiles = s.openFiles.filter((f) => !gone(f.path))
-      const childrenByDir: Record<string, WorkspaceEntry[]> = {}
-      for (const [dir, entries] of Object.entries(s.childrenByDir)) {
-        if (!gone(dir)) childrenByDir[dir] = entries
-      }
-      const expanded = Object.fromEntries(Object.entries(s.expanded).filter(([dir]) => !gone(dir)))
-      return {
-        openFiles,
-        activePath:
-          s.activePath !== null && gone(s.activePath)
-            ? (openFiles[Math.min(activeIndex, openFiles.length - 1)]?.path ?? null)
-            : s.activePath,
-        childrenByDir,
-        expanded,
-        clipboard: s.clipboard && gone(s.clipboard.path) ? null : s.clipboard
-      }
-    })
+    // Trashed files are recoverable — buffers drop without a dirty confirm.
+    set((s) => stateWithoutPath(s, path))
     await get().loadDir(parentDir(path))
   },
 
@@ -521,7 +560,74 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   openHistory: (path) => set({ asideView: 'history', historyPath: path }),
   diffView: null,
   openDiff: (diff) => set({ diffView: diff }),
-  closeDiff: () => set({ diffView: null })
+  closeDiff: () => set({ diffView: null }),
+
+  deletePermanentEntry: async (path) => {
+    const root = get().root
+    if (!root) return
+    await call('code.deletePermanent', { root, path })
+    if (get().root !== root) return
+    set((s) => stateWithoutPath(s, path))
+    await get().loadDir(parentDir(path))
+  },
+
+  openDefault: async (path) => {
+    const root = get().root
+    if (!root) return
+    await call('code.openDefault', { root, path })
+  },
+
+  collapseAll: () => set({ expanded: {} }),
+
+  terminalOpen: true,
+  setTerminalOpen: (open) => set({ terminalOpen: open }),
+  termId: null,
+  setTermId: (id) => set({ termId: id }),
+  pendingTermCommand: null,
+  consumePendingTermCommand: () => {
+    const command = get().pendingTermCommand
+    if (command !== null) set({ pendingTermCommand: null })
+    return command
+  },
+
+  openInTerminal: async (dirPath) => {
+    const root = get().root
+    if (!root) return
+    const abs = dirPath ? `${root}/${dirPath}` : root
+    const command = `cd '${abs.replaceAll("'", `'\\''`)}' && clear\n`
+    set({ terminalOpen: true })
+    const termId = get().termId
+    if (termId) await call('term.write', { termId, data: command })
+    else set({ pendingTermCommand: command }) // the pane writes it once the pty spawns
+  },
+
+  searchDir: '',
+  searchQuery: '',
+  searchResults: null,
+  searching: false,
+
+  openSearch: (dir) => set({ asideView: 'search', searchDir: dir, searchResults: null }),
+
+  runSearch: async (query) => {
+    const root = get().root
+    if (!root) return
+    const dir = get().searchDir
+    set({ searchQuery: query, searching: true })
+    try {
+      if (!query.trim()) {
+        set({ searchResults: null })
+        return
+      }
+      const { results } = await call('code.search', { root, dir, query })
+      // Drop stale responses (typed-ahead query or workspace switch).
+      if (get().root === root && get().searchQuery === query) set({ searchResults: results })
+    } finally {
+      if (get().searchQuery === query) set({ searching: false })
+    }
+  },
+
+  pendingReveal: null,
+  clearReveal: () => set({ pendingReveal: null })
 }))
 
 /** Paste availability for menu builders that run outside a react subscription. */

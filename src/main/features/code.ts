@@ -82,6 +82,20 @@ export function registerCodeFeature(deps: CodeFeatureDeps): void {
     return { ok: true }
   })
 
+  handle('code.openDefault', async ({ root, path }) => {
+    await workspaceFs.openDefault(root, path)
+    return { ok: true }
+  })
+
+  handle('code.deletePermanent', ({ root, path }) => {
+    workspaceFs.deletePermanent(root, path)
+    return { ok: true }
+  })
+
+  handle('code.search', ({ root, dir, query, maxResults }) => ({
+    results: workspaceFs.searchInFolder(root, dir, query, maxResults)
+  }))
+
   handle('term.create', ({ cwd, cols, rows }) => ({ termId: terms.create(cwd, cols, rows) }))
 
   handle('term.write', ({ termId, data }) => {
