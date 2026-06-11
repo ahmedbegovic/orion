@@ -41,7 +41,7 @@ export const TIERS: Record<Tier, TierSpec> = {
     defaultCtx: 8192
   },
   medium: {
-    candidates: ['mlx-community/gemma-4-E4B-it-qat-4bit', 'mlx-community/Qwen3.5-4B-4bit'],
+    candidates: ['mlx-community/gemma-4-E4B-it-qat-4bit', 'mlx-community/Qwen3.5-4B-MLX-4bit'],
     caps: ['text', 'vision', 'audio'],
     approxGB: 5,
     defaultCtx: 16384
@@ -92,7 +92,7 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
   'mlx-community/gemma-4-26B-A4B-it-qat-4bit': 'Gemma 4 26B',
   'mlx-community/gemma-4-31b-it-4bit': 'Gemma 4 31B',
   'mlx-community/Qwen3.5-2B-4bit': 'Qwen 3.5 2B',
-  'mlx-community/Qwen3.5-4B-4bit': 'Qwen 3.5 4B',
+  'mlx-community/Qwen3.5-4B-MLX-4bit': 'Qwen 3.5 4B',
   'mlx-community/Qwen3.5-9B-MLX-4bit': 'Qwen 3.5 9B',
   'mlx-community/Qwen3.6-27B-4bit': 'Qwen 3.6 27B'
 }
