@@ -6,9 +6,33 @@ an OpenAI-compatible inference server ([oMLX](https://github.com/jundot/omlx)) a
 FastAPI tools service (model downloads, document extraction, RAG, web search, news).
 Agentic coding tabs are powered by an embedded [opencode](https://opencode.ai) instance.
 
+It's optimized primarily for the Gemma and Qwen model families, while still
+supporting any other MLX-compatible model you choose to run.
+
 > Built for a single user on Apple Silicon. No auth, no telemetry — everything runs
 > on-device; model weights live in the shared Hugging Face cache
 > (`~/.cache/huggingface/hub`).
+
+## Features
+
+  **Chat** — Streaming local chat with collapsible reasoning, optional web search, and RAG over your document
+  collections.
+
+  <img width="2168" height="1314" alt="Screenshot 2026-06-11 at 2 30 57 AM" src="https://github.com/user-attachments/assets/8a21e5a2-f624-4d46-8a8b-f297f370fbb8" />
+
+  **Agentic coding** — An embedded opencode agent works in a real project: file tree, Monaco editor, integrated
+  terminal, and a live step-by-step log.
+
+  <img width="2168" height="1314" alt="Screenshot 2026-06-11 at 2 27 57 AM" src="https://github.com/user-attachments/assets/b84ee156-3db7-4488-9ff2-04ee984c466b" />
+
+  **Research** — Multi-round deep research that gathers sources and writes a cited, exportable report (PDF).
+
+  <img width="2168" height="1314" alt="Screenshot 2026-06-11 at 2 26 30 AM" src="https://github.com/user-attachments/assets/851fc8c7-ba1f-476a-9112-4e3a3c284ffc" />
+
+  **Models** — Choose models by tier (Low→Ultra) with live RAM-budget checks, set per-feature defaults, manage what's on
+  disk, and search Hugging Face.                                                                       
+
+  <img width="2168" height="1314" alt="Screenshot 2026-06-11 at 2 10 55 AM" src="https://github.com/user-attachments/assets/9e5a6871-de22-428f-b490-20be4aa2750d" />
 
 ## Requirements
 
@@ -39,7 +63,8 @@ Other commands:
   chat pipeline, SQLite (via `node:sqlite`) with versioned migrations
 - `sidecars/engine` — oMLX OpenAI-compatible multi-model server (dynamic port)
 - `sidecars/tools` — FastAPI: downloads, extraction, RAG (LanceDB), search, news
-- `resources/skills/` — bundled skill packs copied into app data on first run
+- `resources/skills/` — skill packs that ship with the app, copied into app data
+  on first run so they can be customized
 
 App data lives in `~/Library/Application Support/Orion/`.
 
