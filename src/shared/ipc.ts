@@ -367,6 +367,11 @@ export const contract = {
     input: z.undefined(),
     output: z.object({ ok: z.boolean() })
   },
+  'system.activity': {
+    /** Throttled renderer activity ping — feeds the app-idle model unload. */
+    input: z.undefined(),
+    output: z.object({ ok: z.boolean() })
+  },
 
   // --- app settings ----------------------------------------------------------
   'settings.get': {

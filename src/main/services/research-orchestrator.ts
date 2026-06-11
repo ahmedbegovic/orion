@@ -276,6 +276,11 @@ export class ResearchOrchestrator {
     return { runId }
   }
 
+  /** True while any research loop is in flight — guards the app-idle unload. */
+  hasActiveRuns(): boolean {
+    return this.active.size > 0
+  }
+
   /** Re-enters the loop from persisted state. Paused or failed runs only. */
   resume(runId: string): boolean {
     if (this.active.has(runId)) return false

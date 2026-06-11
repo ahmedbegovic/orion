@@ -23,6 +23,7 @@ import {
 } from '@shared/model-tiers'
 import type { OrionDatabase } from './db'
 import * as settings from './settings'
+import type { AppSettingsService } from './app-settings'
 import { writeEngineConfig, type EngineConfigModel } from './engine-config'
 import type { EngineClient } from './engine-client'
 import type { RamGuard } from './ram-guard'
@@ -44,9 +45,18 @@ const MEMORY_OVERHEAD = 1.1
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 const round2 = (n: number): number => Math.round(n * 100) / 100
 
-/** Order-insensitive fingerprint of a registry — drives restart decisions. */
+/**
+ * Order-insensitive fingerprint of a registry — drives restart decisions.
+ * ttlSeconds is deliberately excluded: the TTL backstop follows the idle-unload
+ * knob, and changing that knob must never force an engine restart — the new
+ * value simply rides the next natural spawn (command() rewrites the config).
+ */
 const registryKey = (entries: EngineConfigModel[]): string =>
-  JSON.stringify([...entries].sort((a, b) => a.name.localeCompare(b.name)))
+  JSON.stringify(
+    entries
+      .map((e): [string, number] => [e.name, e.maxTokens])
+      .sort((a, b) => a[0].localeCompare(b[0]))
+  )
 
 const tierSpecFor = (repoId: string): TierSpec | undefined => {
   const tier = TIER_ORDER.find((t) => TIERS[t].candidates.includes(repoId))
@@ -81,8 +91,14 @@ export interface ModelServiceDeps {
   engine: EngineClient
   ramGuard: RamGuard
   processManager: ProcessManager
+  appSettings: AppSettingsService
   /** Current allocated engine port; 0 before the first spawn. */
   getEnginePort: () => number
+  /** Unix ms of the last renderer activity ping — feeds the idle sweep. */
+  getLastAppActivityAt: () => number
+  /** Idle-sweep guards: never unload under active background work. */
+  isResearchActive: () => boolean
+  isNewsBusy: () => boolean
   broadcast: (event: OrionEvent) => void
 }
 
@@ -217,23 +233,33 @@ export class ModelService {
     return !!row && row.total > 0 && row.done === 0
   }
 
+  /**
+   * Engine-side TTL is a pure BACKSTOP behind the main-side app-idle sweep
+   * (maybeIdleUnload, driven by `models.idleUnloadSeconds`): strictly larger
+   * (max(base, knob×4)) so the two mechanisms never fight over a model.
+   * 0 in `engine.autoUnloadIdleSeconds` still disables the engine TTL outright.
+   */
+  private backstopTtlSeconds(): number | null {
+    const base = settings.get(this.deps.db, 'engine.autoUnloadIdleSeconds', 1800)
+    if (base <= 0) return null
+    return Math.max(base, this.deps.appSettings.idleUnloadSeconds() * 4)
+  }
+
   private registryEntries(): EngineConfigModel[] {
-    // 0 disables the engine-side per-model idle TTL.
-    const idleSeconds = settings.get(this.deps.db, 'engine.autoUnloadIdleSeconds', 1800)
+    const ttlSeconds = this.backstopTtlSeconds()
     return this.installed.map((m) => {
       const spec = tierSpecFor(m.repoId)
       return {
         name: m.repoId,
         // Output budget: ultra is capped, small models run ctx-bounded.
         maxTokens: spec?.maxOutputTokens ?? m.contextLength ?? 32768,
-        ttlSeconds: idleSeconds > 0 ? idleSeconds : null
+        ttlSeconds
       }
     })
   }
 
   private writeConfig(port: number): EngineConfigModel[] {
     const entries = this.registryEntries()
-    const idleSeconds = settings.get(this.deps.db, 'engine.autoUnloadIdleSeconds', 1800)
     writeEngineConfig({
       port,
       // The embedder is pool-resident under oMLX like any model — give it the
@@ -242,7 +268,7 @@ export class ModelService {
       // stay chat-model-only (maxTokens is inert for an embeddings model).
       models: [
         ...entries,
-        { name: EMBEDDING_MODEL, maxTokens: 1, ttlSeconds: idleSeconds > 0 ? idleSeconds : null }
+        { name: EMBEDDING_MODEL, maxTokens: 1, ttlSeconds: this.backstopTtlSeconds() }
       ],
       budgetGB: this.deps.ramGuard.report(0).budgetGB
     })
@@ -446,7 +472,13 @@ export class ModelService {
       loadedModels: this.engineModels,
       spec: tierSpecFor(repoId)
     })
-    if (!verdict.ok && !force) return { ok: false, reason: verdict.reason }
+    if (!verdict.ok && !force) {
+      // Auto-swap: a tier/model switch must never require a manual unload.
+      // Every consumer (chat/agent/news/research) funnels through here, so
+      // evicting the idle co-residents covers them all — incl. noCoload ultra.
+      const swapped = await this.swapForLoad(repoId, estimatedGB, verdict.reason)
+      if (!swapped.ok) return swapped
+    }
 
     await this.ensureEngineRunning()
     // If a registry change was deferred (engine was busy), the running engine
@@ -459,6 +491,43 @@ export class ModelService {
     }
     await this.deps.engine.warm(repoId)
     return { ok: true }
+  }
+
+  /**
+   * The RAM guard refused the fit — unload every OTHER loaded model (engine
+   * idle only) and re-judge. The vm_stat sampler lags real frees by a few
+   * seconds, so the re-check polls briefly instead of failing on stale data.
+   */
+  private async swapForLoad(
+    repoId: string,
+    estimatedGB: number,
+    refusal: string | undefined
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const others = this.engineModels.filter((m) => m.state === 'loaded' && m.id !== repoId)
+    if (others.length === 0) return { ok: false, reason: refusal }
+    if (!(await this.engineIdle())) {
+      return { ok: false, reason: 'A generation is running — try again when it finishes.' }
+    }
+    this.log.info(`auto-swap: unloading ${others.map((m) => m.id).join(', ')} to fit ${repoId}`)
+    for (const m of others) {
+      await this.deps.engine.unloadModel(m.id)
+    }
+    this.engineModels = this.engineModels.map((m) =>
+      m.id !== repoId && m.state === 'loaded' ? { ...m, state: 'unloaded', memoryGB: null } : m
+    )
+    let verdict = this.deps.ramGuard.canLoad(estimatedGB, {
+      loadedModels: this.engineModels,
+      spec: tierSpecFor(repoId)
+    })
+    for (let attempt = 0; !verdict.ok && attempt < 3; attempt++) {
+      await sleep(1500) // one vm_stat sampling period
+      if (this.disposed) return { ok: false, reason: 'app is shutting down' }
+      verdict = this.deps.ramGuard.canLoad(estimatedGB, {
+        loadedModels: this.engineModels,
+        spec: tierSpecFor(repoId)
+      })
+    }
+    return verdict.ok ? { ok: true } : { ok: false, reason: verdict.reason }
   }
 
   /** Unload every loaded model — real endpoints now, no restart involved. */
@@ -643,7 +712,41 @@ export class ModelService {
       this.pendingRegistryRestart = false
       await this.syncEngineRegistry()
     }
-    // Idle auto-unload is the engine's job now: oMLX enforces the per-model
-    // ttl_seconds written by registryEntries().
+
+    await this.maybeIdleUnload()
+  }
+
+  /**
+   * App-idle unload: everything unloads after `models.idleUnloadSeconds`
+   * without renderer activity (system-wide idle would never fire while Ahmed
+   * games in another app — exactly when the RAM should come back). The engine
+   * ttl_seconds backstop is strictly larger (see backstopTtlSeconds) so the
+   * mechanisms never fight. No latch needed: a successful sweep leaves nothing
+   * loaded, and background loads are guarded until their work finishes.
+   */
+  private async maybeIdleUnload(): Promise<void> {
+    const knobSeconds = this.deps.appSettings.idleUnloadSeconds()
+    if (knobSeconds <= 0) return // disabled in Settings
+    if (Date.now() - this.deps.getLastAppActivityAt() <= knobSeconds * 1000) return
+    if (!this.engineProcessRunning()) return
+    const loaded = this.engineModels.filter((m) => m.state === 'loaded')
+    if (loaded.length === 0) return
+    if (this.activeDownloads.size > 0) return
+    if (this.deps.isResearchActive() || this.deps.isNewsBusy()) return
+    if (!(await this.engineIdle())) return
+    if (this.disposed) return
+    this.log.info(
+      `app idle ${Math.round((Date.now() - this.deps.getLastAppActivityAt()) / 60_000)} min — unloading ${loaded.length} model(s)`
+    )
+    await this.unloadAll()
+    const minutes = Math.max(1, Math.round(knobSeconds / 60))
+    this.deps.broadcast({
+      type: 'system.toast',
+      level: 'info',
+      message:
+        loaded.length === 1
+          ? `Unloaded the model after ${minutes} min of inactivity.`
+          : `Unloaded ${loaded.length} models after ${minutes} min of inactivity.`
+    })
   }
 }

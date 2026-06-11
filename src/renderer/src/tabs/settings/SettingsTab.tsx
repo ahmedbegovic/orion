@@ -234,6 +234,49 @@ function ModulesSection({
   )
 }
 
+function ModelsSection({
+  settings,
+  update
+}: {
+  settings: AppSettings
+  update: (patch: Partial<AppSettings>) => void
+}) {
+  const minutes = Math.round(settings.idleUnloadSeconds / 60)
+  const [draft, setDraft] = useState(String(minutes))
+  useEffect(() => setDraft(String(minutes)), [minutes])
+
+  const commit = (): void => {
+    const next = Math.max(0, Math.round(Number(draft)))
+    if (!Number.isFinite(next)) {
+      setDraft(String(minutes))
+      return
+    }
+    if (next !== minutes) update({ idleUnloadSeconds: next * 60 })
+  }
+
+  return (
+    <Section
+      title="Models"
+      hint="Loaded models are unloaded after this long without activity in Orion. 0 disables."
+    >
+      <label className="flex items-center gap-2 text-[12px] text-zinc-400">
+        Unload after
+        <input
+          value={draft}
+          inputMode="numeric"
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') e.currentTarget.blur()
+          }}
+          className="w-16 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-right text-[12.5px] tabular-nums text-zinc-200 outline-none focus:border-zinc-600"
+        />
+        idle minutes
+      </label>
+    </Section>
+  )
+}
+
 function AboutSection() {
   const version = useSystemStore((s) => s.status?.version)
   const dataDir = useSystemStore((s) => s.status?.dataDir)
@@ -268,6 +311,7 @@ export default function SettingsTab() {
           <ProfileSection settings={settings} update={update} />
           <InstructionsSection settings={settings} update={update} />
           <ModulesSection settings={settings} update={update} />
+          <ModelsSection settings={settings} update={update} />
           <AboutSection />
         </div>
       ) : (

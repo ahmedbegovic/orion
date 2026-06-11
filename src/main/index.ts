@@ -133,6 +133,9 @@ export const engineClient = new EngineClient(() => `http://127.0.0.1:${ports.eng
 const macosMemory = new MacosMemory()
 const ramGuard = new RamGuard(macosMemory)
 
+/** Renderer pings (throttled) land here; the model service's idle sweep reads it. */
+let lastAppActivityAt = Date.now()
+
 async function createWindow(): Promise<void> {
   win = new BrowserWindow({
     width: 1360,
@@ -196,6 +199,11 @@ function registerIpcHandlers(): void {
     await shell.openPath(join(dataDir(), 'logs'))
     return { ok: true }
   })
+
+  handle('system.activity', () => {
+    lastAppActivityAt = Date.now()
+    return { ok: true }
+  })
 }
 
 function registerSidecars(): void {
@@ -238,7 +246,12 @@ app.whenReady().then(async () => {
     engine: engineClient,
     ramGuard,
     processManager,
+    appSettings,
     getEnginePort: () => ports.engine,
+    getLastAppActivityAt: () => lastAppActivityAt,
+    // Constructed later in this function — lazy reads through the module lets.
+    isResearchActive: () => researchOrchestrator?.hasActiveRuns() ?? false,
+    isNewsBusy: () => newsScheduler?.isBusy() ?? false,
     broadcast
   })
   registerModelsFeature({ processManager, modelService, engineClient, ports })

@@ -248,6 +248,11 @@ export class NewsScheduler {
 
   // --- fetch cycle ------------------------------------------------------------------------
 
+  /** True mid-fetch or mid-drain — guards the app-idle model unload. */
+  isBusy(): boolean {
+    return this.fetching || this.draining
+  }
+
   /** Manual refresh: resolves when the fetch cycle completes (the IPC awaits it). */
   refresh(): Promise<void> {
     return this.runCycle()

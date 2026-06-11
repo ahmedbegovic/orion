@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState, type ComponentType, type ReactElement } from 'react'
 import { Settings, type LucideIcon } from 'lucide-react'
 import { isModuleEnabled, MODULES, type ModuleDef } from '@shared/modules'
+import { call } from './lib/ipc'
 import { MODULE_ICONS } from './lib/module-icons'
 import { useSystemStore } from './stores/system'
 import { useSettingsStore } from './stores/settings'
@@ -57,6 +58,25 @@ export default function App() {
     void init()
     void initSettings()
   }, [init, initSettings])
+
+  // Activity pings feed the app-idle model unload: pointer/key/wheel while
+  // focused, at most one tiny IPC every 10s. System-wide idle would never
+  // fire while the user works in OTHER apps — exactly when RAM should free.
+  useEffect(() => {
+    let last = 0
+    const ping = (): void => {
+      if (!document.hasFocus()) return
+      const now = Date.now()
+      if (now - last < 10_000) return
+      last = now
+      void call('system.activity').catch(() => {})
+    }
+    const events = ['pointermove', 'pointerdown', 'keydown', 'wheel'] as const
+    for (const name of events) window.addEventListener(name, ping, { passive: true })
+    return () => {
+      for (const name of events) window.removeEventListener(name, ping)
+    }
+  }, [])
 
   const visible = MODULES.filter((m) => isModuleEnabled(m, modulesEnabled))
 
