@@ -44,6 +44,14 @@ import {
   SourceTracker,
   type ToolExecutionContext
 } from './tools'
+import { traceLlm } from '../llm-trace'
+import { heuristicRoute, routeWithModel, type ChatRoute } from './search-router'
+import {
+  runSearchPipeline,
+  runVisitPipeline,
+  type PipelineEvidence,
+  type SearchPipelineOptions
+} from './search-pipeline'
 
 const MAX_TOOL_ITERATIONS = 8
 const DELTA_COALESCE_MS = 30
@@ -95,6 +103,29 @@ function appendToTrailingUserMessage(messages: ChatCompletionMessage[], text: st
   } else {
     messages.push({ role: 'user', content: text })
   }
+}
+
+/** Last few turns as plain text (thoughts and tool parts dropped) — feeds the
+ * router's reference resolution ("what about Montreal?"). */
+function recentTextHistory(
+  path: Array<{ role: string; parts: MessagePart[] }>,
+  lastUser: { role: string; parts: MessagePart[] }
+): Array<{ role: 'user' | 'assistant'; text: string }> {
+  const idx = path.indexOf(lastUser as (typeof path)[number])
+  const prior = (idx >= 0 ? path.slice(0, idx) : path).filter(
+    (m) => m.role === 'user' || m.role === 'assistant'
+  )
+  return prior
+    .map((m) => ({
+      role: m.role as 'user' | 'assistant',
+      text: m.parts
+        .filter((p): p is Extract<MessagePart, { type: 'text' }> => p.type === 'text')
+        .map((p) => p.text)
+        .join('\n')
+        .trim()
+    }))
+    .filter((h) => h.text)
+    .slice(-4)
 }
 
 /**
@@ -428,11 +459,28 @@ export class ChatOrchestrator {
       // without it the engine falls back to its generic 0.7/0.9 defaults.
       const sampling = this.deps.modelService.samplingFor(modelId)
 
+      // Harness-owned web pipeline: when routing says the turn needs the web,
+      // gather the evidence up front and let the model only write the answer —
+      // small models under-search when they own the loop. A 'direct' verdict
+      // or ANY non-abort failure leaves toolDefs untouched: exactly today's
+      // loop. Collection chats stay model-owned too: a tools-off synthesis
+      // round would take rag_search away from the very turn that needs it.
+      let loopToolDefs = toolDefs
+      if (webEnabled && !hasCollection) {
+        const evidence = await this.tryGatherWebEvidence({ ctx, stream, path, sources, toolCtx })
+        if (evidence) {
+          appendToTrailingUserMessage(messages, evidence.text)
+          // Evidence in hand: tools off, so the model synthesizes instead of
+          // re-looping (and cites the [n] numbers the pipeline minted).
+          loopToolDefs = []
+        }
+      }
+
       const finished = await this.runModelLoop({
         ctx,
         stream,
         messages,
-        toolDefs,
+        toolDefs: loopToolDefs,
         knownToolNames,
         toolCtx,
         sampling
@@ -477,9 +525,91 @@ export class ChatOrchestrator {
   }
 
   /**
+   * Route the turn and, when it needs the web, run the harness-owned search
+   * pipeline. Returns the evidence block to append to the trailing user
+   * message, or null for "run today's model loop" — a direct verdict, an
+   * image/attachment turn, or any non-abort failure all degrade there.
+   */
+  private async tryGatherWebEvidence(args: {
+    ctx: RunContext
+    stream: PartStream
+    path: Array<{ role: string; parts: MessagePart[] }>
+    sources: SourceTracker
+    toolCtx: ToolExecutionContext
+  }): Promise<PipelineEvidence | null> {
+    const { ctx, stream, path, sources, toolCtx } = args
+    const { controller } = ctx
+    try {
+      const lastUser = path.findLast((m) => m.role === 'user')
+      if (!lastUser) return null
+      // Image and document turns stay model-owned: the router can't see an
+      // image, and a turn that attaches a document is about the document
+      // (prepareUserParts appends extra text parts for attachments).
+      if (lastUser.parts.some((p) => p.type === 'image')) return null
+      const textParts = lastUser.parts.filter(
+        (p): p is Extract<MessagePart, { type: 'text' }> => p.type === 'text'
+      )
+      if (textParts.length !== 1) return null
+      const question = textParts[0].text.trim()
+      if (!question) return null
+
+      const priorAssistant = path.findLast((m) => m.role === 'assistant')
+      const priorUsedWeb =
+        priorAssistant?.parts.some(
+          (p) => p.type === 'tool_call' && (p.name === 'web_search' || p.name === 'web_visit')
+        ) ?? false
+
+      const decision = heuristicRoute(question, priorUsedWeb)
+      if (decision.kind === 'direct') return null
+      let route: ChatRoute
+      if (decision.kind === 'visit') {
+        route = { kind: 'visit', urls: decision.urls }
+      } else {
+        route = await routeWithModel({
+          engine: this.deps.engine,
+          model: ctx.modelId,
+          question,
+          history: recentTextHistory(path, lastUser),
+          forceSearch: decision.forceSearch,
+          conversationId: ctx.conversationId,
+          signal: controller.signal
+        })
+      }
+      if (route.kind === 'direct') return null
+
+      const opts: SearchPipelineOptions = {
+        engine: this.deps.engine,
+        tools: this.deps.tools,
+        model: ctx.modelId,
+        question,
+        conversationId: ctx.conversationId,
+        sources,
+        searxngUrl: toolCtx.searxngUrl,
+        signal: controller.signal,
+        emit: {
+          addPart: (part) => stream.add(part),
+          toolEvent: (id, name, phase, detail) => this.toolEvent(ctx, id, name, phase, detail)
+        }
+      }
+      return route.kind === 'visit'
+        ? await runVisitPipeline(route.urls, opts)
+        : await runSearchPipeline(route.queries, opts)
+    } catch (err) {
+      // Abort propagates to run()'s handler; everything else degrades.
+      if (controller.signal.aborted) throw err
+      this.log.warn(
+        `search pipeline failed, falling back to the model loop: ${err instanceof Error ? err.message : err}`
+      )
+      return null
+    }
+  }
+
+  /**
    * The model-owned ReAct loop: stream a round, execute its tool calls,
    * repeat until the model answers in text or the budget forces a final
-   * tools-disabled round. Extracted from run() verbatim — behavior-neutral.
+   * tools-disabled round. Also serves as the synthesis round after the
+   * search pipeline gathered evidence (toolDefs: [] — the model can't
+   * re-loop, it can only write the answer).
    */
   private async runModelLoop(args: {
     ctx: RunContext
@@ -501,6 +631,8 @@ export class ChatOrchestrator {
     // <= cap: one extra tools-disabled round so a cap exit still produces an answer.
     for (let iteration = 0; iteration <= MAX_TOOL_ITERATIONS; iteration++) {
       const splitter = createContentSplitter(family)
+      const roundStartedAt = Date.now()
+      let finishReason: string | null = null
       let visibleText = ''
       let toolCalls: WireToolCall[] = []
       const consume = (segments: ReturnType<typeof splitter.push>): void => {
@@ -524,6 +656,7 @@ export class ChatOrchestrator {
         else if (event.type === 'reasoning') stream.append('thought', event.text)
         else {
           toolCalls = event.toolCalls
+          finishReason = event.finishReason
           // Last round only, NOT summed: the final prompt already re-encodes
           // every earlier round's output, so tokensIn + tokensOut is the true
           // end-of-generation context size (the donut's numerator).
@@ -532,6 +665,20 @@ export class ChatOrchestrator {
         }
       }
       consume(splitter.flush())
+      traceLlm({
+        surface: 'chat',
+        step: toolDefs.length > 0 ? 'loop' : 'synthesis',
+        conversationId: ctx.conversationId,
+        model: modelId,
+        messages,
+        output: visibleText,
+        parsed: toolCalls.length > 0 ? toolCalls : undefined,
+        ok: true,
+        finishReason,
+        tokensIn,
+        tokensOut,
+        ms: Date.now() - roundStartedAt
+      })
 
       // Imitated textual tool calls: the text-encoded history teaches gemma
       // the literal '[tool_call] name(args)' shape and it sometimes emits
@@ -929,15 +1076,27 @@ export class ChatOrchestrator {
     if (!lowLoaded) return
 
     // Title generation goes through EngineClient too — inflight stays truthful.
+    const startedAt = Date.now()
+    const messages = titleMessages(userText, assistantText)
     let raw = ''
     for await (const event of this.deps.engine.streamChat({
       model: lowModel,
-      messages: titleMessages(userText, assistantText),
+      messages,
       maxTokens: 200 // thinking tokens count against max_tokens before the title
     })) {
       if (event.type === 'content') raw += event.text
     }
     const title = cleanTitle(stripThoughts(raw, familyOf(lowModel)))
+    traceLlm({
+      surface: 'chat',
+      step: 'title',
+      conversationId,
+      model: lowModel,
+      messages,
+      output: raw,
+      ok: title.length > 0,
+      ms: Date.now() - startedAt
+    })
     if (!title) return
     this.deps.repo.setTitle(conversationId, title)
     this.deps.broadcast({ type: 'chat.titleChanged', conversationId, title })

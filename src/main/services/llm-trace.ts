@@ -65,6 +65,15 @@ const sanitizeMessages = (messages: ChatCompletionMessage[]): unknown[] =>
 
 export function traceLlm(input: LlmTraceInput): void {
   const record = { ts: Date.now(), ...input, messages: sanitizeMessages(input.messages) }
+  // Serialize NOW: chat-loop message arrays mutate between rounds, and a
+  // queued write must capture the request as it was sent.
+  let line: string
+  try {
+    line = `${JSON.stringify(record)}\n`
+  } catch (err) {
+    log.warn(`trace record not serializable: ${err instanceof Error ? err.message : err}`)
+    return
+  }
   chain = chain
     .then(async () => {
       const path = tracePath()
@@ -74,7 +83,7 @@ export function traceLlm(input: LlmTraceInput): void {
       }
       const size = await stat(path).then((s) => s.size).catch(() => 0)
       if (size > MAX_BYTES) await rename(path, `${path}.1`).catch(() => {})
-      await appendFile(path, `${JSON.stringify(record)}\n`)
+      await appendFile(path, line)
     })
     .catch((err) => {
       // Tracing never breaks a generation — log once per failure and move on.
