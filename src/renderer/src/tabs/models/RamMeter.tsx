@@ -14,8 +14,8 @@ export default function RamMeter({ ram }: { ram: RamReport }) {
   return (
     <div className="flex items-center gap-3">
       <span className="text-[11px] tabular-nums text-zinc-500">
-        {gb(ram.freeGB)} GB free of {gb(ram.totalGB)} · budget {gb(ram.budgetGB)} ·{' '}
-        {gb(ram.loadedGB)} loaded
+        {gb(ram.availableGB ?? ram.freeGB)} GB available of {gb(ram.totalGB)} · budget{' '}
+        {gb(ram.budgetGB)} · {gb(ram.loadedGB)} loaded
       </span>
       <div
         className="flex h-1.5 w-44 overflow-hidden rounded-full bg-zinc-800"

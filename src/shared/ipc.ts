@@ -97,6 +97,8 @@ export const tierResolutionSchema = z.object({
 export const ramReportSchema = z.object({
   totalGB: z.number(),
   freeGB: z.number(),
+  /** vm_stat-derived available memory (free+inactive+purgeable+speculative); null when sampling fails. */
+  availableGB: z.number().nullable(),
   budgetGB: z.number(),
   loadedGB: z.number()
 })

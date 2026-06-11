@@ -107,6 +107,8 @@ export interface TierResolution {
 export interface RamReport {
   totalGB: number
   freeGB: number
+  /** vm_stat-derived available memory (free+inactive+purgeable+speculative); null when sampling fails. */
+  availableGB: number | null
   /** Engine registry memory budget. */
   budgetGB: number
   /** Sum of estimated footprints of currently loaded engine models. */

@@ -9,6 +9,7 @@ import { ProcessManager } from './services/process-manager'
 import { ToolsClient } from './services/tools-client'
 import { EngineClient } from './services/engine-client'
 import { RamGuard } from './services/ram-guard'
+import { MacosMemory } from './services/macos-memory'
 import { ModelService } from './services/model-service'
 import {
   dataDir,
@@ -126,7 +127,8 @@ const ports = { tools: 0, engine: 0 }
 export const toolsClient = new ToolsClient(() => `http://127.0.0.1:${ports.tools}`)
 export const engineClient = new EngineClient(() => `http://127.0.0.1:${ports.engine}`)
 
-const ramGuard = new RamGuard()
+const macosMemory = new MacosMemory()
+const ramGuard = new RamGuard(macosMemory)
 
 async function createWindow(): Promise<void> {
   win = new BrowserWindow({
@@ -219,6 +221,7 @@ app.whenReady().then(async () => {
 
   db = openDatabase(join(dataDir(), 'orion.db'))
 
+  macosMemory.start()
   sweepStaleProcesses()
   registerSidecars()
   registerIpcHandlers()
@@ -326,6 +329,7 @@ app.on('before-quit', (event) => {
       // nothing keeps streaming term.data/fsChanged into a closing window.
       termService?.dispose()
       await workspaceFs?.dispose()
+      macosMemory.stop()
       modelService?.dispose()
       // Chat/research/news/library/MCP teardown must precede the sidecar
       // shutdown: abort in-flight generations and stop ingest pollers before
