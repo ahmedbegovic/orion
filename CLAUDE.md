@@ -12,7 +12,7 @@ Apple Silicon only; dev machine has 24GB unified memory — RAM headroom is the 
 - `uv sync` inside `sidecars/tools` or `sidecars/engine` — sync sidecar venvs
 - `npm run dist` — package DMG (M6+)
 
-## Architecture (see ~/.claude/plans/i-want-to-create-witty-flamingo.md for the full plan)
+## Architecture
 
 - `src/shared/ipc.ts` — the typed IPC contract (zod). Renderer calls `window.orion.call(method, input)`;
   main pushes events on one channel. Every new feature extends this contract first.
