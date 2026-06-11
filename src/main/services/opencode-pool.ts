@@ -4,7 +4,7 @@ import { createParser } from 'eventsource-parser'
 import type { InstalledModel } from '@shared/types'
 import type { ManagedProcess, ProcessManager } from './process-manager'
 import { allocatePort } from './ports'
-import { opencodeConfigKey, writeOpencodeConfig } from './opencode-config'
+import { opencodeConfigKey, writeOpencodeConfig, type ConsultTierMap } from './opencode-config'
 import { scopedLogger } from './logger'
 
 const MAX_SERVERS = 2
@@ -29,6 +29,8 @@ export interface OpencodePoolDeps {
   getInstructionsText: () => string
   /** Runtime-updated binary first, bundled otherwise (see runtime-manager). */
   getOpencodeBinary: () => string
+  /** Active model per tier for consult_model — also a fingerprint input. */
+  getConsult: () => { tierMap: ConsultTierMap; budgetGB: number }
 }
 
 interface PoolServer {
@@ -179,7 +181,8 @@ export class OpencodePool {
           enginePort: this.deps.getEnginePort(),
           toolsPort: this.deps.getToolsPort(),
           models: this.deps.installedModels(),
-          instructionsText: this.deps.getInstructionsText()
+          instructionsText: this.deps.getInstructionsText(),
+          consult: this.deps.getConsult()
         }
         server.configKey = opencodeConfigKey(configOpts)
         const configPath = writeOpencodeConfig(configOpts)
@@ -230,7 +233,8 @@ export class OpencodePool {
       enginePort: this.deps.getEnginePort(),
       toolsPort: this.deps.getToolsPort(),
       models: this.deps.installedModels(),
-      instructionsText: this.deps.getInstructionsText()
+      instructionsText: this.deps.getInstructionsText(),
+      consult: this.deps.getConsult()
     })
   }
 

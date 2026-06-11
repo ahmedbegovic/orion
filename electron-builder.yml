@@ -32,6 +32,9 @@ extraResources:
   # Pinned uv copied by the predist script (uvBinary() → Resources/bin/uv).
   - from: build/uv
     to: bin/uv
+  # Bundled skill packs; skills.ts copies them into userData on first run.
+  - from: resources/skills
+    to: skills
 mac:
   target:
     - target: dmg

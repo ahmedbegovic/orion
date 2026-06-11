@@ -83,6 +83,133 @@ server.registerTool(
   }
 )
 
+// --- cross-model consultation (P2-14) ---------------------------------------
+// Same server, no new process. opencode runs tools BETWEEN generations, so the
+// host model is never mid-stream while we swap models; oMLX lazily reloads the
+// host model on its next turn, and main's auto-swap covers the app side.
+
+const ENGINE_STATUS_TIMEOUT_MS = 15_000
+const CONSULT_TIMEOUT_MS = 10 * 60_000
+
+function engineBase() {
+  const base = process.env.ORION_ENGINE_URL
+  if (!base) throw new Error('ORION_ENGINE_URL is not set')
+  return base.replace(/\/+$/, '')
+}
+
+/** tier -> { modelId (engine id), estGB, label }; written by opencode-config. */
+function tierMap() {
+  try {
+    return JSON.parse(process.env.ORION_TIER_MAP ?? '{}')
+  } catch {
+    return {}
+  }
+}
+
+async function engineFetch(path, init, timeoutMs) {
+  const res = await fetch(`${engineBase()}${path}`, {
+    ...init,
+    signal: AbortSignal.timeout(timeoutMs)
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`engine ${path} → ${res.status}: ${text.slice(0, 300)}`)
+  }
+  return res.json()
+}
+
+server.registerTool(
+  'list_tiers',
+  {
+    description:
+      'List the locally installed model tiers available to consult_model (label, model id, estimated RAM).',
+    inputSchema: {}
+  },
+  async () => {
+    try {
+      const map = tierMap()
+      const tiers = Object.entries(map)
+      if (tiers.length === 0) return textResult('No tiers are installed right now.')
+      const budget = Number(process.env.ORION_ENGINE_BUDGET_GB ?? '0')
+      const lines = tiers.map(
+        ([tier, t]) => `- ${tier} (${t.label}): ${t.modelId} — ~${t.estGB} GB`
+      )
+      if (budget) lines.push(`Memory budget: ${budget} GB.`)
+      lines.push('Each consult_model call may take several minutes (model swap).')
+      return textResult(lines.join('\n'))
+    } catch (err) {
+      return errorResult(err)
+    }
+  }
+)
+
+server.registerTool(
+  'consult_model',
+  {
+    description:
+      'Ask another locally installed model tier one question and return its full reply. ' +
+      'SLOW: the engine may unload/load multi-GB models first — a call can take minutes. ' +
+      'Use list_tiers to see what is available; never call this in a loop.',
+    inputSchema: {
+      tier: z.string().describe('Tier key from list_tiers (e.g. "high")'),
+      prompt: z.string().describe('The question for the consulted model'),
+      system: z.string().optional().describe('Optional system prompt for the consulted model')
+    }
+  },
+  async ({ tier, prompt, system }) => {
+    try {
+      const map = tierMap()
+      const target = map[tier]
+      if (!target) {
+        return errorResult(
+          new Error(`Unknown tier "${tier}" — installed tiers: ${Object.keys(map).join(', ') || 'none'}`)
+        )
+      }
+      const budget = Number(process.env.ORION_ENGINE_BUDGET_GB ?? '0')
+      if (budget && target.estGB > budget) {
+        return errorResult(
+          new Error(`${target.label} (~${target.estGB} GB) cannot fit the ${budget} GB memory budget on this machine.`)
+        )
+      }
+      // Never yank models out from under a running generation.
+      const status = await engineFetch('/api/status', undefined, ENGINE_STATUS_TIMEOUT_MS)
+      const busy = (status.active_requests ?? 0) + (status.waiting_requests ?? 0)
+      if (busy > 0) {
+        return errorResult(new Error('The engine is busy with another generation — try again shortly.'))
+      }
+      // Sequential swap: free every OTHER loaded model so the consultee fits.
+      const { models = [] } = await engineFetch('/v1/models/status', undefined, ENGINE_STATUS_TIMEOUT_MS)
+      for (const m of models) {
+        if (m.loaded && m.id !== target.modelId) {
+          await engineFetch(`/v1/models/${m.id}/unload`, { method: 'POST' }, 120_000)
+        }
+      }
+      const completion = await engineFetch(
+        '/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: target.modelId,
+            messages: [
+              ...(system ? [{ role: 'system', content: system }] : []),
+              { role: 'user', content: prompt }
+            ],
+            stream: false,
+            max_tokens: 4096
+          })
+        },
+        CONSULT_TIMEOUT_MS
+      )
+      const reply = completion.choices?.[0]?.message?.content ?? ''
+      if (!reply) return errorResult(new Error('The consulted model returned an empty reply.'))
+      return textResult(`[${target.label} — ${target.modelId}]\n\n${reply}`)
+    } catch (err) {
+      return errorResult(err)
+    }
+  }
+)
+
 try {
   await server.connect(new StdioServerTransport())
 } catch (err) {

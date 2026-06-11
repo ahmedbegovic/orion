@@ -1,19 +1,26 @@
 import {
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   readlinkSync,
+  rmSync,
   symlinkSync,
   unlinkSync,
+  writeFileSync,
   type Stats
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import type { SkillMeta } from '@shared/types'
-import { dataDir } from './paths'
+import { dataDir, resourcesDir } from './paths'
 import { scopedLogger } from './logger'
+
+/** Bump when the bundled packs change — marker-carrying installs get refreshed. */
+const BUNDLED_PACK_VERSION = 1
+const BUNDLED_MARKER = '.orion-bundled'
 
 /**
  * Skills are user-authored prompt packs: <dataDir>/skills/<name>/SKILL.md with
@@ -28,6 +35,51 @@ export class SkillsService {
 
   init(): void {
     mkdirSync(this.dir, { recursive: true })
+    this.installBundledPacks()
+  }
+
+  /**
+   * Copy the bundled packs (resources/skills/*) into the user dir. The
+   * `.orion-bundled` marker is what distinguishes "ours" from user-authored:
+   * marker-carrying dirs refresh when the pack version bumps; dirs WITHOUT a
+   * marker (user-created or user-adopted) are never touched.
+   */
+  private installBundledPacks(): void {
+    const source = join(resourcesDir(), 'skills')
+    let packs: string[]
+    try {
+      packs = readdirSync(source, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+    } catch {
+      return // no bundled packs in this build
+    }
+    for (const name of packs) {
+      const target = join(this.dir, name)
+      const marker = join(target, BUNDLED_MARKER)
+      try {
+        const firstInstall = !existsSync(target)
+        if (!firstInstall) {
+          if (!existsSync(marker)) continue // user-authored — hands off
+          const installed = JSON.parse(readFileSync(marker, 'utf8')) as { version?: number }
+          if ((installed.version ?? 0) >= BUNDLED_PACK_VERSION) continue
+          rmSync(target, { recursive: true, force: true })
+        }
+        cpSync(join(source, name), target, { recursive: true })
+        writeFileSync(marker, JSON.stringify({ version: BUNDLED_PACK_VERSION }) + '\n')
+        // Enable for Agent/Code on first install only — a user who disabled a
+        // pack must not find it re-enabled by an update.
+        if (firstInstall) {
+          try {
+            this.setAgentEnabled(name, true)
+          } catch (err) {
+            this.log.warn(`could not enable bundled skill ${name}: ${err instanceof Error ? err.message : err}`)
+          }
+        }
+      } catch (err) {
+        this.log.warn(`bundled skill ${name} install failed: ${err instanceof Error ? err.message : err}`)
+      }
+    }
   }
 
   list(): SkillMeta[] {

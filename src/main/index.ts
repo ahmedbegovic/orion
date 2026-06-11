@@ -28,8 +28,10 @@ import { NewsScheduler } from './services/news-scheduler'
 import { McpManager } from './services/mcp-manager'
 import { SkillsService } from './services/skills'
 import { AppSettingsService } from './services/app-settings'
-import { renderInstructionsText } from './services/opencode-config'
+import { renderInstructionsText, type ConsultTierMap } from './services/opencode-config'
 import { OpencodePool } from './services/opencode-pool'
+import { engineModelId } from './services/engine-client'
+import { modelDisplayName, TIER_LABELS } from '@shared/model-tiers'
 import { AgentService } from './services/agent-service'
 import { WorkspaceFs } from './services/workspace-fs'
 import { GitService } from './services/git-service'
@@ -345,13 +347,30 @@ app.whenReady().then(async () => {
   registerNewsFeature(newsScheduler)
 
   const theDb = db
+  // consult_model's reachable models: each tier's resolved active model,
+  // flattened to engine ids (what /v1/chat/completions expects).
+  const consultInfo = (): { tierMap: ConsultTierMap; budgetGB: number } => {
+    const overview = models.overview()
+    const tierMap: ConsultTierMap = {}
+    for (const resolution of overview.tiers) {
+      if (!resolution.active) continue
+      const candidate = resolution.candidates.find((c) => c.repoId === resolution.active)
+      tierMap[resolution.tier] = {
+        modelId: engineModelId(resolution.active),
+        estGB: candidate?.estGB ?? 0,
+        label: `${TIER_LABELS[resolution.tier]} — ${modelDisplayName(resolution.active)}`
+      }
+    }
+    return { tierMap, budgetGB: overview.ram.budgetGB }
+  }
   opencodePool = new OpencodePool({
     processManager,
     getEnginePort: () => ports.engine,
     getToolsPort: () => ports.tools,
     installedModels: () => models.overview().installed,
     getInstructionsText: () => renderInstructionsText(appSettings.get()),
-    getOpencodeBinary: () => resolveOpencodeBinary(theDb)
+    getOpencodeBinary: () => resolveOpencodeBinary(theDb),
+    getConsult: consultInfo
   })
   registerRuntimesFeature(
     new RuntimeManager({

@@ -6,6 +6,11 @@ import { TIERS, TIER_ORDER, modelDisplayName, type TierSpec } from '@shared/mode
 import { engineModelId } from './engine-client'
 import { dataDir, nodeRunner, resourcesDir } from './paths'
 
+/** What consult_model can reach: tier -> active model (engine id) + footprint. */
+export interface ConsultTierMap {
+  [tier: string]: { modelId: string; estGB: number; label: string }
+}
+
 export interface OpencodeConfigOptions {
   enginePort: number
   toolsPort: number
@@ -13,6 +18,8 @@ export interface OpencodeConfigOptions {
   models: InstalledModel[]
   /** Rendered Settings profile + instructions markdown; '' = nothing to inject. */
   instructionsText: string
+  /** Cross-model consultation env for the MCP server (P2-14). */
+  consult: { tierMap: ConsultTierMap; budgetGB: number }
 }
 
 /** Settings → Profile/Instructions rendered for opencode's instructions array. */
@@ -57,7 +64,12 @@ export function opencodeConfigKey(opts: OpencodeConfigOptions): string {
     opts.models.map((m) => [m.repoId, m.contextLength]).sort(),
     // Instructions ride the config (instructions.md) — edited Settings must
     // respawn stale servers exactly like a moved port.
-    opts.instructionsText
+    opts.instructionsText,
+    // The consult tier map rides MCP env — tier selection changes must
+    // respawn servers so consult_model sees the new active models.
+    Object.entries(opts.consult.tierMap)
+      .map(([tier, t]) => [tier, t.modelId])
+      .sort()
   ])
 }
 
@@ -105,6 +117,10 @@ export function writeOpencodeConfig(opts: OpencodeConfigOptions): string {
         command: [nodeRunner().command, join(resourcesDir(), 'orion-web-mcp.mjs')],
         environment: {
           ORION_TOOLS_URL: `http://127.0.0.1:${opts.toolsPort}`,
+          // Cross-model consultation (orion_web_consult_model / _list_tiers).
+          ORION_ENGINE_URL: `http://127.0.0.1:${opts.enginePort}`,
+          ORION_TIER_MAP: JSON.stringify(opts.consult.tierMap),
+          ORION_ENGINE_BUDGET_GB: String(opts.consult.budgetGB),
           ...nodeRunner().env
         },
         enabled: true
