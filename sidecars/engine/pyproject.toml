@@ -3,9 +3,13 @@ name = "crispin-engine"
 version = "0.1.0"
 description = "Crispin inference sidecar: oMLX OpenAI-compatible multi-model server"
 requires-python = ">=3.12"
+# [grammar] pulls xgrammar — without it response_format json_schema silently
+# degrades to prompt injection (the engine flags that with an RFC-7234 Warning
+# header). Constrained decoding is a hard dependency of chat/research
+# structured calls; never drop the extra.
 dependencies = [
-    "omlx",
+    "omlx[grammar]",
 ]
 
 [tool.uv.sources]
-omlx = { git = "https://github.com/jundot/omlx.git", tag = "v0.4.3" }
+omlx = { git = "https://github.com/jundot/omlx.git", tag = "v0.4.4rc1" }
