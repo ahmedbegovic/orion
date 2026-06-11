@@ -508,6 +508,11 @@ export class ModelService {
     estimatedGB: number,
     refusal: string | undefined
   ): Promise<{ ok: boolean; reason?: string }> {
+    // A budget-bound refusal is constant in loaded models and system memory —
+    // evicting (and stalling on re-checks) can never flip it.
+    if (estimatedGB > this.deps.ramGuard.report(0).budgetGB) {
+      return { ok: false, reason: refusal }
+    }
     const others = this.engineModels.filter((m) => m.state === 'loaded' && m.id !== repoId)
     if (others.length === 0) return { ok: false, reason: refusal }
     if (!(await this.engineIdle())) {

@@ -124,9 +124,12 @@ export default function TerminalPane({ root, open }: Props) {
     if (!term || restartingRef.current) return
     restartingRef.current = true
     try {
-      // The title-strip restart also lands here with a live shell — kill it first.
+      // The title-strip restart also lands here with a live shell — kill it
+      // first; store termId goes null NOW so openInTerminal queues instead of
+      // writing to the dying pty.
       const oldId = termIdRef.current
       termIdRef.current = null
+      useCodeStore.getState().setTermId(null)
       if (oldId) await call('term.kill', { termId: oldId }).catch(() => {})
       term.reset()
       const { termId } = await call('term.create', { cwd: root, cols: term.cols, rows: term.rows })
@@ -136,7 +139,12 @@ export default function TerminalPane({ root, open }: Props) {
         return
       }
       termIdRef.current = termId
-      useCodeStore.getState().setTermId(termId)
+      const store = useCodeStore.getState()
+      store.setTermId(termId)
+      // Same contract as the mount path: a cd queued while no pty was alive
+      // must land in this fresh shell, never linger to poison a later one.
+      const pending = store.consumePendingTermCommand()
+      if (pending) void call('term.write', { termId, data: pending }).catch(() => {})
       setExited(false)
       term.focus()
     } finally {

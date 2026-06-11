@@ -60,22 +60,33 @@ export default function EditorPane() {
   const diffView = useCodeStore((s) => s.diffView)
   const closeDiff = useCodeStore((s) => s.closeDiff)
   const pendingReveal = useCodeStore((s) => s.pendingReveal)
-  const clearReveal = useCodeStore((s) => s.clearReveal)
   const [closeTarget, setCloseTarget] = useState<OpenFile | null>(null)
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null)
 
   const activeFile = openFiles.find((f) => f.path === activePath)
 
-  // Find-in-Folder hit: jump the editor to the matched line once it's active.
-  useEffect(() => {
-    if (!pendingReveal || pendingReveal.path !== activePath) return
+  // Find-in-Folder hit: jump the editor to the matched line. Lives behind a
+  // ref because the FIRST mount races this effect (loader.init resolves after
+  // the effect runs with editorRef still null) — handleMount retries it.
+  const revealPendingRef = useRef<() => void>(() => {})
+  revealPendingRef.current = () => {
+    const s = useCodeStore.getState()
+    const reveal = s.pendingReveal
     const editor = editorRef.current
-    if (!editor) return
-    editor.revealLineInCenter(pendingReveal.line)
-    editor.setPosition({ lineNumber: pendingReveal.line, column: 1 })
-    editor.focus()
-    clearReveal()
-  }, [pendingReveal, activePath, clearReveal])
+    if (!reveal || !editor || reveal.path !== s.activePath) return
+    try {
+      editor.revealLineInCenter(reveal.line)
+      editor.setPosition({ lineNumber: reveal.line, column: 1 })
+      editor.focus()
+    } catch {
+      // a disposed editor (diff open / unmount race) — keep the reveal pending
+      return
+    }
+    s.clearReveal()
+  }
+  useEffect(() => {
+    revealPendingRef.current()
+  }, [pendingReveal, activePath])
 
   // Dispose monaco models of closed files (the Editor never disposes them
   // itself), keyed by root-namespaced URIs so relative paths from different
@@ -84,6 +95,9 @@ export default function EditorPane() {
   useEffect(() => {
     const keep = new Set(openFiles.map((f) => monaco.Uri.parse(`${root}/${f.path}`).toString()))
     for (const model of monaco.editor.getModels()) {
+      // The DiffEditor's transient models live on inmemory:// auto URIs —
+      // sweeping them mid-diff blanks the widget with a disposed-model error.
+      if (model.uri.scheme === 'inmemory') continue
       if (!keep.has(model.uri.toString())) model.dispose()
     }
   }, [openFiles, root])
@@ -98,6 +112,7 @@ export default function EditorPane() {
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveActiveRef.current())
+    revealPendingRef.current()
   }
 
   const requestClose = (file: OpenFile): void => {
@@ -217,6 +232,9 @@ export default function EditorPane() {
             value={activeFile.content}
             language={languageFor(activeFile.path)}
             theme="vs-dark"
+            // Unmounting for a diff view must not dispose the file's model —
+            // that wipes its undo stack; the sweep effect owns disposal.
+            keepCurrentModel
             onMount={handleMount}
             onChange={(value) => {
               if (value !== undefined) edit(activeFile.path, value)

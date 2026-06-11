@@ -316,7 +316,18 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
       expanded: {},
       openFiles: [],
       activePath: null,
-      clipboard: null
+      clipboard: null,
+      // Per-workspace feature state must not leak across the switch: a stale
+      // diff/history/search would present workspace A's data as B's, and a
+      // queued cd would steer B's fresh shell into A.
+      asideView: 'files',
+      historyPath: null,
+      diffView: null,
+      searchDir: '',
+      searchQuery: '',
+      searchResults: null,
+      pendingReveal: null,
+      pendingTermCommand: null
     })
   },
 
@@ -329,7 +340,15 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
       expanded: {},
       openFiles: [],
       activePath: null,
-      clipboard: null
+      clipboard: null,
+      asideView: 'files',
+      historyPath: null,
+      diffView: null,
+      searchDir: '',
+      searchQuery: '',
+      searchResults: null,
+      pendingReveal: null,
+      pendingTermCommand: null
     })
     await call('code.closeWorkspace', { root })
   },

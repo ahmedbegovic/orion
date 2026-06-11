@@ -1,5 +1,4 @@
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import type { OrionEvent } from '@shared/ipc'
 import type { PermissionMode, PipelineSnapshot, PipelineStageId } from '@shared/types'
 import type { AgentService } from './agent-service'
@@ -58,7 +57,9 @@ export class PipelineService {
       throw new Error('A pipeline is already running in this session')
     }
     const directory = this.deps.agentService.sessionDirectory(sessionId)
-    const repo = existsSync(join(directory, '.git'))
+    // rev-parse walks up parent dirs — a session rooted BELOW the repo top
+    // level is still committable (a bare .git check would skip the gate).
+    const repo = isInsideWorkTree(directory)
     const stages: PipelineSnapshot['stages'] = [
       { id: 'plan', status: 'pending' },
       { id: 'implement', status: 'pending' },
@@ -97,16 +98,23 @@ export class PipelineService {
   async abort(pipelineId: string): Promise<void> {
     const run = this.byId(pipelineId)
     if (!run || !this.isActive(run)) return
+    // Status flips BEFORE the abort POST: the abort itself produces a
+    // completed assistant message + session.idle on the SSE stream, and those
+    // events racing the fetch would otherwise advance the pipeline and fire
+    // the next stage's prompt into opencode.
     this.clearTimer(run)
+    const current = run.snapshot.stages[run.snapshot.currentIndex]
+    if (current && current.status === 'running') current.status = 'failed'
+    run.snapshot.status = 'aborted'
+    this.publish(run)
     try {
       await this.deps.agentService.abort(run.snapshot.sessionId)
     } catch (err) {
       this.log.warn(`abort: ${errMessage(err)}`)
     }
-    const current = run.snapshot.stages[run.snapshot.currentIndex]
-    if (current && current.status === 'running') current.status = 'failed'
-    run.snapshot.status = 'aborted'
-    this.publish(run)
+    // Belt and braces: an event handled between the flip and here cannot have
+    // armed a timer (onSessionEvent gates on status), but clear regardless.
+    this.clearTimer(run)
   }
 
   /** The commit gate's Approve/Skip. */
@@ -154,9 +162,18 @@ export class PipelineService {
 
   private onSessionEvent(sessionId: string, event: unknown): void {
     const run = this.bySession.get(sessionId)
-    if (!run || run.snapshot.status !== 'running') return
+    if (!run) return
     const type = (event as { type?: unknown }).type
     if (typeof type !== 'string') return
+
+    // Session deleted: events stop routing here forever — drop the run (and
+    // its timer) instead of letting it hang 'running' for 90 minutes.
+    if (type === 'orion.sessionDeleted') {
+      this.clearTimer(run)
+      this.bySession.delete(sessionId)
+      return
+    }
+    if (run.snapshot.status !== 'running') return
 
     if (type === 'orion.promptFailed') {
       this.fail(run, String((event as { error?: unknown }).error ?? 'prompt failed'))
@@ -259,6 +276,7 @@ export class PipelineService {
 
   private fail(run: PipelineRun, error: string): void {
     this.clearTimer(run)
+    if (run.snapshot.status === 'aborted') return // an abort verdict is final
     const current = run.snapshot.stages[run.snapshot.currentIndex]
     if (current && current.status === 'running') current.status = 'failed'
     run.snapshot.status = 'failed'
@@ -372,6 +390,21 @@ export class PipelineService {
 }
 
 const errMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+function isInsideWorkTree(directory: string): boolean {
+  try {
+    return (
+      execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
+        cwd: directory,
+        timeout: 5_000,
+        encoding: 'utf8',
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
+      }).trim() === 'true'
+    )
+  } catch {
+    return false // no git / not a repo — the commit stage stays skipped
+  }
+}
 
 const clipTail = (text: string): string =>
   text.length > ISSUES_CLIP ? `…${text.slice(-ISSUES_CLIP)}` : text

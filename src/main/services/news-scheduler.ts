@@ -309,8 +309,12 @@ export class NewsScheduler {
       return
     }
     this.fetching = true
-    this.lastCycleAt = Date.now()
     try {
+      // Never stamp the staleness clock before the sidecar is reachable — a
+      // boot-race cycle that connection-refuses every source would otherwise
+      // park fetch-on-open for 15 minutes with nothing to retry it.
+      if (!(await this.waitForTools(new AbortController().signal))) return
+      this.lastCycleAt = Date.now()
       const sources = this.deps.db
         .prepare('SELECT * FROM news_sources WHERE enabled = 1 ORDER BY rowid')
         .all() as unknown as SourceRow[]

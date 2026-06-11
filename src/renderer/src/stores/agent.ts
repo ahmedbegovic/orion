@@ -210,6 +210,8 @@ interface AgentStore {
   refreshPipeline: (sessionId: string) => Promise<void>
   /** Hide a finished pipeline's bar. */
   dismissPipeline: (sessionId: string) => void
+  /** Ids hidden via dismissPipeline — main still retains the runs. */
+  dismissedPipelineIds: Set<string>
   abort: (sessionId: string) => Promise<void>
   permissionReply: (
     sessionId: string,
@@ -388,9 +390,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     })
 
     onEvent('pipeline.update', ({ pipeline }) => {
-      set((s) => ({
-        pipelineBySession: { ...s.pipelineBySession, [pipeline.sessionId]: pipeline }
-      }))
+      set((s) =>
+        s.dismissedPipelineIds.has(pipeline.id)
+          ? {}
+          : { pipelineBySession: { ...s.pipelineBySession, [pipeline.sessionId]: pipeline } }
+      )
     })
 
     await get().refresh()
@@ -453,6 +457,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   pipelineBySession: {},
 
+  // Dismissals are renderer-only while main retains finished runs — remember
+  // the dismissed ids so refreshPipeline/pipeline.update don't resurrect them.
+  dismissedPipelineIds: new Set<string>(),
+
   startPipeline: async (sessionId, task, options) => {
     if (get().busyBySession[sessionId])
       throw new Error('The agent is already working in this session')
@@ -471,7 +479,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   refreshPipeline: async (sessionId) => {
     const { pipeline } = await call('pipeline.get', { sessionId })
     set((s) => {
-      if (!pipeline) {
+      if (!pipeline || s.dismissedPipelineIds.has(pipeline.id)) {
         const { [sessionId]: _gone, ...rest } = s.pipelineBySession
         return { pipelineBySession: rest }
       }
@@ -481,8 +489,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   dismissPipeline: (sessionId) =>
     set((s) => {
-      const { [sessionId]: _gone, ...pipelineBySession } = s.pipelineBySession
-      return { pipelineBySession }
+      const { [sessionId]: gone, ...pipelineBySession } = s.pipelineBySession
+      const dismissedPipelineIds = new Set(s.dismissedPipelineIds)
+      if (gone) dismissedPipelineIds.add(gone.id)
+      return { pipelineBySession, dismissedPipelineIds }
     }),
 
   prompt: async (sessionId, text, tier) => {
@@ -557,6 +567,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       messagesBySession: without(s.messagesBySession, sessionId),
       busyBySession: without(s.busyBySession, sessionId),
       permissionQueue: s.permissionQueue.filter((p) => p.sessionId !== sessionId),
+      pipelineBySession: without(s.pipelineBySession, sessionId),
+      modeBySession: without(s.modeBySession, sessionId),
       activeId: s.activeId === sessionId ? null : s.activeId
     }))
     // activeId is the Agent tab's selection — never refill it with a code session.

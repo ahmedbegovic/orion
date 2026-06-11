@@ -793,13 +793,22 @@ export class ChatOrchestrator {
         .filter((p): p is Extract<MessagePart, { type: 'text' }> => p.type === 'text')
         .map((p) => p.text)
         .join('\n')
-    const userText = textOf(path.find((m) => m.role === 'user')?.parts ?? [])
+    const firstUserParts = path.find((m) => m.role === 'user')?.parts ?? []
+    const userText = textOf(firstUserParts)
     const assistantText = textOf(path.findLast((m) => m.role === 'assistant')?.parts ?? [])
     if (!userText || !assistantText) return
 
     // Refine only the instant truncated title — never overwrite a user rename
-    // or an earlier refinement.
-    if (conversation.title !== 'New chat' && conversation.title !== instantTitle(userText)) return
+    // or an earlier refinement. Compare against the FIRST text part alone:
+    // prepareUserParts appends extra text parts for document attachments,
+    // which never fed the instant title.
+    const rawUserText =
+      firstUserParts.find(
+        (p): p is Extract<MessagePart, { type: 'text' }> => p.type === 'text'
+      )?.text ?? ''
+    if (conversation.title !== 'New chat' && conversation.title !== instantTitle(rawUserText)) {
+      return
+    }
 
     const overview = this.deps.modelService.overview()
     const lowModel = overview.tiers.find((t) => t.tier === 'low')?.active

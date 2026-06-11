@@ -5,6 +5,7 @@ import { call } from './lib/ipc'
 import { MODULE_ICONS } from './lib/module-icons'
 import { useSystemStore } from './stores/system'
 import { useSettingsStore } from './stores/settings'
+import { useModelsStore } from './stores/models'
 import { useUiStore } from './stores/ui'
 import StatusBar from './components/StatusBar'
 import Toasts from './components/Toasts'
@@ -57,6 +58,12 @@ export default function App() {
   useEffect(() => {
     void init()
     void initSettings()
+    // Composers label "Default (X)" from the models overview — load it at
+    // boot, not first Models-tab visit, or the label lies about the tier.
+    void useModelsStore
+      .getState()
+      .init()
+      .catch(() => {})
   }, [init, initSettings])
 
   // Activity pings feed the app-idle model unload: pointer/key/wheel while

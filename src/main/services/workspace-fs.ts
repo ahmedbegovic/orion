@@ -10,6 +10,7 @@ import {
   statSync,
   writeFileSync
 } from 'node:fs'
+import * as fsp from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { shell } from 'electron'
 import { watch, type FSWatcher } from 'chokidar'
@@ -200,23 +201,25 @@ export class WorkspaceFs {
   /**
    * Case-insensitive literal search under dir. Skips noise dirs, >2MB files
    * and binaries; capped (results carry 1-based line/column for Monaco).
+   * Async file IO on purpose: this runs in the MAIN process and re-runs per
+   * debounced keystroke — a synchronous scan would freeze the whole app.
    */
-  searchInFolder(
+  async searchInFolder(
     root: string,
     dir: string,
     query: string,
     maxResults = 500
-  ): Array<{ path: string; line: number; column: number; preview: string }> {
+  ): Promise<Array<{ path: string; line: number; column: number; preview: string }>> {
     const start = this.jailed(root, dir)
     const needle = query.toLowerCase()
     const results: Array<{ path: string; line: number; column: number; preview: string }> = []
     if (!needle) return results
 
-    const walk = (dirAbs: string, dirRel: string): void => {
+    const walk = async (dirAbs: string, dirRel: string): Promise<void> => {
       if (results.length >= maxResults) return
       let entries
       try {
-        entries = readdirSync(dirAbs, { withFileTypes: true })
+        entries = await fsp.readdir(dirAbs, { withFileTypes: true })
       } catch {
         return
       }
@@ -225,18 +228,18 @@ export class WorkspaceFs {
         const rel = dirRel ? `${dirRel}/${entry.name}` : entry.name
         const abs = join(dirAbs, entry.name)
         if (entry.isDirectory()) {
-          if (!IGNORED_DIRS.has(entry.name)) walk(abs, rel)
+          if (!IGNORED_DIRS.has(entry.name)) await walk(abs, rel)
           continue
         }
         if (!entry.isFile()) continue
         try {
-          if (statSync(abs).size > MAX_FILE_BYTES) continue
+          if ((await fsp.stat(abs)).size > MAX_FILE_BYTES) continue
         } catch {
           continue
         }
         let text: string
         try {
-          text = readFileSync(abs, 'utf8')
+          text = await fsp.readFile(abs, 'utf8')
         } catch {
           continue
         }
@@ -255,7 +258,7 @@ export class WorkspaceFs {
         }
       }
     }
-    walk(start.abs, start.rel)
+    await walk(start.abs, start.rel)
     return results
   }
 

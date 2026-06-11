@@ -163,10 +163,13 @@ export function renderReportHtml(report: ResearchReport, meta: ReportMeta): stri
   // Hero: the first CITED source carrying an og:image. No scripts run in the
   // sandboxed iframe, so a broken url shows as an empty CSS-bounded box.
   const citedIds = new Set(report.sections.flatMap((s) => s.citations))
+  // No loading="lazy" anywhere in this document: research.exportPdf prints
+  // right after loadFile resolves, and lazy images are exempt from blocking
+  // the load event — they'd be absent from every exported PDF.
   const heroSrc = imageSrc(
     report.sources.find((s) => citedIds.has(s.id) && imageSrc(s.imageUrl))?.imageUrl
   )
-  const hero = heroSrc ? `<img class="hero" src="${heroSrc}" alt="" loading="lazy">` : ''
+  const hero = heroSrc ? `<img class="hero" src="${heroSrc}" alt="">` : ''
 
   const sections = report.sections
     .map((section) => {
@@ -193,7 +196,7 @@ export function renderReportHtml(report: ResearchReport, meta: ReportMeta): stri
       const label = escapeHtml(src.title?.trim() || src.url)
       const urlLine = href ? `<span class="src-url">${href}</span>` : ''
       const thumbSrc = imageSrc(src.imageUrl)
-      const thumb = thumbSrc ? `<img class="src-thumb" src="${thumbSrc}" alt="" loading="lazy">` : ''
+      const thumb = thumbSrc ? `<img class="src-thumb" src="${thumbSrc}" alt="">` : ''
       return `<li id="src-${src.id}" value="${src.id}">${thumb}${
         href ? `<a href="${href}" target="_blank" rel="noreferrer">${label}</a>` : label
       }${urlLine}</li>`

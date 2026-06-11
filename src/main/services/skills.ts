@@ -142,7 +142,14 @@ export class SkillsService {
     }
     if (stat) {
       if (!stat.isSymbolicLink()) throw new Error(`${link} already exists and is not a symlink`)
-      unlinkSync(link) // re-point a stale link
+      // Re-point only OUR stale links — a user-managed symlink (e.g. into a
+      // personal dotfiles skills repo) must never be silently destroyed,
+      // especially now that installBundledPacks() auto-enables 20 packs.
+      const target = resolve(dirname(link), readlinkSync(link))
+      if (!target.startsWith(this.dir + sep)) {
+        throw new Error(`${link} points outside Orion's skills — not re-pointing a user-managed link`)
+      }
+      unlinkSync(link)
     }
     symlinkSync(dir, link, 'dir')
   }

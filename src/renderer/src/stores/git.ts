@@ -22,6 +22,11 @@ interface GitStore {
 
 let fsDebounce: ReturnType<typeof setTimeout> | null = null
 
+// Two refreshes for one root can be in flight at once (mutation burst, focus
+// racing git.changed) — only the NEWEST response may land, or a stale status
+// snapshot overwrites the fresh one.
+const refreshEpochs = new Map<string, number>()
+
 export const useGitStore = create<GitStore>((set, get) => ({
   statusByRoot: {},
   initialized: false,
@@ -59,7 +64,10 @@ export const useGitStore = create<GitStore>((set, get) => ({
   },
 
   refresh: async (root) => {
+    const epoch = (refreshEpochs.get(root) ?? 0) + 1
+    refreshEpochs.set(root, epoch)
     const status = await call('git.status', { root })
+    if (refreshEpochs.get(root) !== epoch) return // a newer refresh superseded this one
     set((s) => ({ statusByRoot: { ...s.statusByRoot, [root]: status } }))
   },
 
@@ -103,7 +111,9 @@ export function buildDecorations(status: GitStatus | undefined): {
   if (!status?.repo) return { byPath, dirtyDirs }
   for (const file of status.files) {
     const added = file.untracked || file.indexState === 'A'
-    byPath.set(file.path, added ? 'added' : 'modified')
+    // Defensive trailing-slash strip (status runs -uall, but older snapshots
+    // could carry collapsed 'dir/' untracked entries).
+    byPath.set(file.path.replace(/\/$/, ''), added ? 'added' : 'modified')
     let dir = file.path
     for (;;) {
       const slash = dir.lastIndexOf('/')

@@ -211,6 +211,9 @@ export class AgentService {
 
   async delete(sessionId: string): Promise<void> {
     const row = this.row(sessionId)
+    // Listeners (pipeline) must hear about the deletion — after the row goes,
+    // SSE events stop resolving to this session and nothing else tells them.
+    this.emitSessionEvent(sessionId, { type: 'orion.sessionDeleted' })
     const server = this.deps.pool.runningServer(row.directory)
     if (server) {
       try {
@@ -221,6 +224,7 @@ export class AgentService {
       }
     }
     this.deps.db.prepare('DELETE FROM agent_sessions WHERE id = ?').run(sessionId)
+    this.modeBySession.delete(sessionId)
   }
 
   // --- memory -------------------------------------------------------------------

@@ -92,8 +92,8 @@ export function registerCodeFeature(deps: CodeFeatureDeps): void {
     return { ok: true }
   })
 
-  handle('code.search', ({ root, dir, query, maxResults }) => ({
-    results: workspaceFs.searchInFolder(root, dir, query, maxResults)
+  handle('code.search', async ({ root, dir, query, maxResults }) => ({
+    results: await workspaceFs.searchInFolder(root, dir, query, maxResults)
   }))
 
   handle('term.create', ({ cwd, cols, rows }) => ({ termId: terms.create(cwd, cols, rows) }))

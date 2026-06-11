@@ -171,16 +171,28 @@ server.registerTool(
           new Error(`${target.label} (~${target.estGB} GB) cannot fit the ${budget} GB memory budget on this machine.`)
         )
       }
-      // Never yank models out from under a running generation.
+      // Never yank models out from under a running generation. models_loading
+      // counts too: a request parked in a lazy cold load registers in neither
+      // active nor waiting (same pitfall engine-client documents).
       const status = await engineFetch('/api/status', undefined, ENGINE_STATUS_TIMEOUT_MS)
-      const busy = (status.active_requests ?? 0) + (status.waiting_requests ?? 0)
+      const busy =
+        (status.active_requests ?? 0) +
+        (status.waiting_requests ?? 0) +
+        (status.models_loading ?? 0)
       if (busy > 0) {
         return errorResult(new Error('The engine is busy with another generation — try again shortly.'))
       }
       // Sequential swap: free every OTHER loaded model so the consultee fits.
+      // Only real pool models (source_repo_id present) — oMLX appends virtual
+      // built-ins like MarkItDown that report loaded but 404 on /unload.
       const { models = [] } = await engineFetch('/v1/models/status', undefined, ENGINE_STATUS_TIMEOUT_MS)
       for (const m of models) {
-        if (m.loaded && m.id !== target.modelId) {
+        if (
+          m.loaded &&
+          m.id !== target.modelId &&
+          typeof m.source_repo_id === 'string' &&
+          m.source_repo_id.length > 0
+        ) {
           await engineFetch(`/v1/models/${m.id}/unload`, { method: 'POST' }, 120_000)
         }
       }

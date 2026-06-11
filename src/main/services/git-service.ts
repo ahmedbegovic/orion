@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { isAbsolute, join, normalize, resolve, sep } from 'node:path'
+import { isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { shell } from 'electron'
 import type { OrionEvent } from '@shared/ipc'
 import type { GitFileStatus, GitLogEntry, GitStatus } from '@shared/types'
@@ -35,14 +35,40 @@ export class GitService {
   async status(root: string): Promise<GitStatus> {
     let out: string
     try {
-      out = await this.git(root, ['status', '--porcelain=v2', '--branch', '-z'])
+      // -uall lists untracked FILES (not collapsed 'dir/' entries) so tree
+      // decorations and Changes rows always name real paths.
+      out = await this.git(root, [
+        'status',
+        '--porcelain=v2',
+        '--branch',
+        '--untracked-files=all',
+        '-z'
+      ])
     } catch (err) {
       if (err instanceof Error && /not a git repository/i.test(err.message)) {
         return { repo: false, branch: null, ahead: 0, behind: 0, files: [] }
       }
       throw err
     }
-    return { repo: true, ...parsePorcelainV2(out) }
+    const parsed = parsePorcelainV2(out)
+    // Porcelain paths are TOPLEVEL-relative; the IPC contract (and every
+    // consumer: decorations, stage/discard pathspecs, trashItem joins) is
+    // workspace-relative. A workspace below the repo root must translate —
+    // and drop entries outside the workspace entirely.
+    const toplevel = (await this.git(root, ['rev-parse', '--show-toplevel'])).trim()
+    const prefix = relative(toplevel, resolve(root)).split(sep).join('/')
+    if (prefix) {
+      const p = `${prefix}/`
+      parsed.files = parsed.files
+        .filter((f) => f.path.startsWith(p))
+        .map((f) => ({
+          ...f,
+          path: f.path.slice(p.length),
+          renamedFrom:
+            f.renamedFrom && f.renamedFrom.startsWith(p) ? f.renamedFrom.slice(p.length) : null
+        }))
+    }
+    return { repo: true, ...parsed }
   }
 
   async stage(root: string, paths: string[]): Promise<void> {
@@ -56,9 +82,10 @@ export class GitService {
       await this.git(root, ['restore', '--staged', '--', ...rel])
     } catch (err) {
       // Unborn branch (nothing committed yet): restore needs HEAD; drop the
-      // entries from the index instead.
+      // entries from the index instead. -f because rm --cached refuses files
+      // edited after staging — safe, --cached never touches the worktree.
       if (err instanceof Error && /HEAD/i.test(err.message)) {
-        await this.git(root, ['rm', '--cached', '-r', '--quiet', '--', ...rel])
+        await this.git(root, ['rm', '--cached', '-r', '-f', '--quiet', '--', ...rel])
       } else {
         throw err
       }
@@ -115,11 +142,16 @@ export class GitService {
 
   /** File content at a ref; null for binaries and >2MB payloads. */
   async show(root: string, ref: string, path: string): Promise<string | null> {
-    if (!/^[\w./~^-]+$/.test(ref)) throw new Error(`Invalid ref: ${ref}`)
+    // ':' admits index refs (':0'); a leading '-' would parse as an option.
+    if (!/^[\w.:/~^-]+$/.test(ref) || ref.startsWith('-')) {
+      throw new Error(`Invalid ref: ${ref}`)
+    }
     const [rel] = this.relPaths([path])
     let out: string
     try {
-      out = await this.git(root, ['show', `${ref}:${rel}`])
+      // './' anchors the path to the cwd (the workspace) — bare paths in a
+      // <ref>:<path> spec are TOPLEVEL-relative and break subdir workspaces.
+      out = await this.git(root, ['show', `${ref}:./${rel}`])
     } catch {
       return null // path absent at that ref (new file, unborn HEAD)
     }

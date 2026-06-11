@@ -1,7 +1,13 @@
 import { memo } from 'react'
-import ReactMarkdown, { type Components } from 'react-markdown'
+import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
+
+// react-markdown's default urlTransform strips any scheme outside its http(s)
+// allowlist BEFORE component renderers run — without this passthrough the img
+// renderer below would never see an orion-attachment: src.
+const urlTransform = (url: string): string =>
+  /^orion-attachment:/i.test(url) ? url : defaultUrlTransform(url)
 
 // Tailwind preflight strips element margins, so markdown elements are styled
 // here instead of a global stylesheet (no typography plugin installed).
@@ -98,6 +104,7 @@ const MarkdownPart = memo(function MarkdownPart({ text }: Props) {
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
         components={components}
+        urlTransform={urlTransform}
       >
         {text}
       </ReactMarkdown>

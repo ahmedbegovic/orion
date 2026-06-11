@@ -49,14 +49,18 @@ export class RamGuard {
       }
     }
 
-    // The engine evicts IDLE loaded models LRU-style to fit the budget, so
-    // their footprints count as reclaimable headroom — even for a noCoload
-    // (ultra) model, which simply guarantees everything else gets evicted.
-    const reclaimableGB = opts.loadedModels
+    // The engine evicts loaded models LRU-style ONLY to fit its own budget —
+    // it never evicts for system-memory pressure. So the credit must be the
+    // eviction the engine will actually be forced to perform for this load,
+    // not the sum of everything loaded (crediting it all let guarded loads
+    // co-load past available memory and swap-storm anyway).
+    const loadedGB = opts.loadedModels
       .filter((m) => m.state === 'loaded')
       .reduce((sum, m) => sum + (m.memoryGB ?? 0), 0)
-    const shortfallGB = estimatedGB - reclaimableGB
+    const forcedEvictionGB = Math.min(loadedGB, Math.max(0, loadedGB + estimatedGB - ram.budgetGB))
+    const shortfallGB = estimatedGB - forcedEvictionGB
     if (shortfallGB <= 0) return { ok: true }
+    const reclaimableGB = forcedEvictionGB
 
     if (ram.availableGB !== null) {
       // vm_stat-derived available memory is what loads actually have to work

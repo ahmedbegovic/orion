@@ -84,6 +84,7 @@ function InlineNameInput({ initial }: { initial: string }) {
   const committing = useRef(false)
 
   const commit = (input: HTMLInputElement): void => {
+    if (committing.current) return // double-Enter before the IPC resolves
     const name = input.value.trim()
     if (!name) return
     if (name.includes('/')) {
@@ -421,6 +422,9 @@ export default function FileTree() {
   const onTreeKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
     // Inline rename/create inputs own their keys.
     if ((e.target as HTMLElement).tagName === 'INPUT') return
+    // A confirm dialog is modal in spirit — shortcuts behind it (Backspace
+    // double-trash, Cmd+V, Enter) must not fire while it is up.
+    if (trashTarget !== null || permanentTarget !== null || editing !== null) return
     const s = useCodeStore.getState()
     const rows = visibleRows(s.childrenByDir, s.expanded)
     const index = selectedPath ? rows.findIndex((r) => r.path === selectedPath) : -1

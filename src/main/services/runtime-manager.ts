@@ -64,13 +64,21 @@ export interface RuntimeManagerDeps {
  * command builders append `--no-sync` while the marker exists, and deleting
  * the marker (reset) makes the next spawn re-sync back to the bundled lock:
  * a mechanical, always-available rollback.
+ *
+ * Markers are MODE-KEYED and live OUTSIDE the venv directories: dev and
+ * packaged share the same userData, and a dev-written marker inside
+ * dataDir/venvs/<name> would both pin the packaged spawn (--no-sync against
+ * a venv that may only contain the marker file) and make uv reject the dir
+ * as a venv. Never create the packaged venv path from here.
  */
 export function pinMarkerPath(name: 'engine' | 'tools'): string {
-  return join(dataDir(), 'venvs', name, '.orion-pinned')
+  return join(dataDir(), 'runtime-pins', `${app.isPackaged ? 'packaged' : 'dev'}-${name}.json`)
 }
 
 export function isPinned(name: 'engine' | 'tools'): boolean {
-  return existsSync(pinMarkerPath(name))
+  // A marker without a usable venv must not force --no-sync: uv would refuse
+  // to run outright, with no in-app path back.
+  return existsSync(pinMarkerPath(name)) && existsSync(venvPython(name))
 }
 
 function venvDir(name: 'engine' | 'tools'): string {
@@ -144,20 +152,28 @@ export class RuntimeManager {
   }
 
   async reset(component: RuntimeComponent): Promise<void> {
-    if (component === 'opencode') {
-      settings.set(this.deps.db, 'runtimes.opencodePath', null)
-      // Next prompt respawns servers with the bundled binary.
-      await this.deps.pool.stopAll()
-    } else {
-      // Delete the marker → the next spawn re-syncs to the bundled lock.
-      try {
-        unlinkSync(pinMarkerPath(component))
-      } catch {
-        // not pinned — nothing to do
+    // Same mutex as update(): a reset mid-install would interleave a uv sync
+    // with the in-flight uv pip install on the same venv.
+    if (this.busy) throw new Error('Another runtime update is already running')
+    this.busy = true
+    try {
+      if (component === 'opencode') {
+        settings.set(this.deps.db, 'runtimes.opencodePath', null)
+        // Next prompt respawns servers with the bundled binary.
+        await this.deps.pool.stopAll()
+      } else {
+        // Delete the marker → the next spawn re-syncs to the bundled lock.
+        try {
+          unlinkSync(pinMarkerPath(component))
+        } catch {
+          // not pinned — nothing to do
+        }
+        await this.deps.processManager.get(component)?.restart('runtime reset')
       }
-      await this.deps.processManager.get(component)?.restart('runtime reset')
+      this.deps.broadcast({ type: 'runtimes.changed' })
+    } finally {
+      this.busy = false
     }
-    this.deps.broadcast({ type: 'runtimes.changed' })
   }
 
   // --- per-component updates ---------------------------------------------------
@@ -305,7 +321,7 @@ export class RuntimeManager {
     content: { package: string; version: string; previous: unknown }
   ): void {
     const path = pinMarkerPath(name)
-    mkdirSync(join(dataDir(), 'venvs', name), { recursive: true })
+    mkdirSync(join(dataDir(), 'runtime-pins'), { recursive: true })
     writeFileSync(path, JSON.stringify({ ...content, pinnedAt: Date.now() }, null, 2) + '\n')
   }
 

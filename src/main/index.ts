@@ -101,7 +101,10 @@ function sweepStaleProcesses(): void {
     // our own Electron helpers and, in dev, anything with the repo path in argv.
     const ours = [
       `${uvBinary()} run --project ${join(resourcesRoot(), 'sidecars')}`, // tools/engine wrappers
-      opencodeBinary() // opencode servers (absolute path in both modes)
+      opencodeBinary(), // opencode servers (bundled binary, absolute in both modes)
+      // Runtime-updated opencode binaries live under userData — without this
+      // prefix their crash orphans would never be swept.
+      join(dataDir(), 'bin', 'opencode') + sep
     ]
     for (const [name, pid] of Object.entries(saved.pids ?? {})) {
       try {

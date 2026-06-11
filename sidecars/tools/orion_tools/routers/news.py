@@ -60,7 +60,10 @@ def _entry_image(entry: Any) -> Optional[str]:
     for item in entry.get("media_content") or []:
         medium = item.get("medium")
         mime = item.get("type") or ""
-        if medium not in (None, "image") and not mime.startswith("image/"):
+        # Accept only explicitly image-typed or completely untyped entries —
+        # either attribute saying "not an image" (video/mp4, x-shockwave-flash…)
+        # must skip, or video/podcast URLs end up rendered as <img>.
+        if (medium or mime) and medium != "image" and not mime.startswith("image/"):
             continue
         url = _http_link(item.get("url"))
         if url:
