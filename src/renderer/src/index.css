@@ -49,3 +49,9 @@ body {
 .scrollbar-none::-webkit-scrollbar {
   display: none;
 }
+
+/* Terminal breathing room. On .xterm itself (not the container) so the
+   FitAddon subtracts it when computing rows/cols — see TerminalPane.tsx. */
+.xterm {
+  padding: 6px 0 6px 8px;
+}

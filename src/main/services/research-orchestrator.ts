@@ -12,7 +12,6 @@ import type {
   ResearchStepType,
   Tier
 } from '@shared/types'
-import { TIER_ORDER } from '@shared/model-tiers'
 import type { CrispinDatabase } from './db'
 import * as settings from './settings'
 import { dataDir } from './paths'
@@ -855,31 +854,13 @@ export class ResearchOrchestrator {
     return clip(stripThoughts(raw, familyOf(lowModel)).trim(), SUMMARY_CHAR_LIMIT)
   }
 
-  /** Requested tier first, then nearest installed below, then above (mirrors chat). */
+  /** Requested tier first, then nearest installed below, then above (shared walk). */
   private resolveModel(tier: Tier): string {
-    const overview = this.deps.modelService.overview()
-    const active = new Map(overview.tiers.map((t) => [t.tier, t.active]))
-    const start = TIER_ORDER.indexOf(tier)
-    const order = [
-      tier,
-      ...TIER_ORDER.slice(0, start).reverse(),
-      ...TIER_ORDER.slice(start + 1)
-    ]
-    for (const candidate of order) {
-      const modelId = active.get(candidate)
-      if (modelId) return modelId
-    }
-    throw new Error('No chat models installed — download one in the Models tab first.')
+    return this.deps.modelService.resolveActiveRepo(tier)
   }
 
-  private async ensureModelLoaded(modelId: string): Promise<void> {
-    const overview = this.deps.modelService.overview()
-    const alreadyLoaded =
-      overview.engine.running &&
-      overview.engine.models.some((m) => m.id === modelId && m.state === 'loaded')
-    if (alreadyLoaded) return
-    const res = await this.deps.modelService.load(modelId)
-    if (!res.ok) throw new Error(res.reason ?? `could not load ${modelId}`)
+  private ensureModelLoaded(modelId: string): Promise<void> {
+    return this.deps.modelService.ensureLoaded(modelId)
   }
 
   // --- synthesis -------------------------------------------------------------------------

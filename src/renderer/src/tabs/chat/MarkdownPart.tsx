@@ -45,7 +45,9 @@ const components: Components = {
       <code className={className} {...props} />
     ) : (
       <code
-        className="rounded bg-zinc-800 px-1 py-0.5 text-[12px] text-zinc-200"
+        // overflow-wrap:anywhere — long unbroken file paths/URLs in inline
+        // code must wrap, not push the panel into horizontal scrolling.
+        className="rounded bg-zinc-800 px-1 py-0.5 text-[12px] text-zinc-200 [overflow-wrap:anywhere]"
         {...props}
       />
     ),
@@ -99,7 +101,7 @@ interface Props {
  */
 const MarkdownPart = memo(function MarkdownPart({ text }: Props) {
   return (
-    <div className="select-text text-[13.5px] leading-relaxed text-zinc-200">
+    <div className="select-text break-words text-[13.5px] leading-relaxed text-zinc-200">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}

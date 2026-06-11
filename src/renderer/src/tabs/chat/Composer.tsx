@@ -13,6 +13,7 @@ import {
 import { FEATURE_DEFAULTS, TIER_LABELS, TIER_ORDER } from '@shared/model-tiers'
 import type { AttachmentInput, Conversation, SkillMeta, Tier } from '@shared/types'
 import { call } from '@/lib/ipc'
+import { useAutosizeTextarea } from '@/lib/useAutosizeTextarea'
 import { useChatStore } from '@/stores/chat'
 import { useLibraryStore } from '@/stores/library'
 import { useModelsStore } from '@/stores/models'
@@ -25,7 +26,8 @@ import ContextDonut from './ContextDonut'
 const FILE_ACCEPT =
   'image/png,image/jpeg,image/webp,image/gif,.pdf,.docx,.pptx,.xlsx,.md,.txt,.html,.csv,.epub'
 
-const MAX_TEXTAREA_PX = 180
+// Matches the textarea's max-h-44 — the autosize overflow toggle keys off it.
+const MAX_TEXTAREA_PX = 176
 
 const MANAGE_SENTINEL = '__manage__'
 
@@ -56,18 +58,14 @@ export default function Composer({ conversation }: Props) {
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
+    // Chat only sees opted-in skills — the badge must match what the model
+    // actually gets, not advertise the agent-only packs.
     void call('skills.list')
-      .then((r) => setSkills(r.skills))
+      .then((r) => setSkills(r.skills.filter((s) => s.chatEnabled)))
       .catch(() => {})
   }, [])
 
-  // Autosize after every text commit (covers programmatic clears on send).
-  useEffect(() => {
-    const el = textareaRef.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_PX)}px`
-  }, [text])
+  useAutosizeTextarea(textareaRef, text, MAX_TEXTAREA_PX)
 
   const addFiles = (files: Iterable<File>): void => {
     for (const file of files) {

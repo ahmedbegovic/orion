@@ -251,7 +251,9 @@ export const skillMetaSchema = z.object({
   name: z.string(),
   description: z.string(),
   /** True when the skill is symlinked into opencode (Agent/Code tabs). */
-  agentEnabled: z.boolean()
+  agentEnabled: z.boolean(),
+  /** True when the skill is opted into the Chat system prompt (default off). */
+  chatEnabled: z.boolean()
 })
 
 /** Which UI surface owns an opencode session. */
@@ -265,6 +267,8 @@ export const agentSessionMetaSchema = z.object({
   tab: agentTabSchema,
   directory: z.string(),
   title: z.string().nullable(),
+  /** Last explicitly chosen model tier — the composer restores it on switch. */
+  tier: tierSchema.nullable(),
   createdAt: z.number(),
   lastUsedAt: z.number().nullable()
 })
@@ -647,6 +651,11 @@ export const contract = {
     input: z.object({ name: z.string(), enabled: z.boolean() }),
     output: z.object({ ok: z.boolean() })
   },
+  'skills.setChatEnabled': {
+    /** Opts the skill into (or out of) the Chat system prompt's skill list. */
+    input: z.object({ name: z.string(), enabled: z.boolean() }),
+    output: z.object({ ok: z.boolean() })
+  },
 
   // --- agent (opencode) -------------------------------------------------------------
   'agent.sessions': {
@@ -825,7 +834,9 @@ export const contract = {
       options: z.object({
         commit: z.boolean(),
         docs: z.boolean(),
-        permissionMode: permissionModeSchema.optional()
+        permissionMode: permissionModeSchema.optional(),
+        /** Stage model tier; undefined follows the session/feature default. */
+        tier: tierSchema.optional()
       })
     }),
     output: z.object({ pipelineId: z.string() })

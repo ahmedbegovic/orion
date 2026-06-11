@@ -2,7 +2,7 @@ import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { AppSettings } from '@shared/ipc'
 import type { InstalledModel } from '@shared/types'
-import { TIERS, TIER_ORDER, modelDisplayName, type TierSpec } from '@shared/model-tiers'
+import { TIERS, modelDisplayName, tierOfRepo, type TierSpec } from '@shared/model-tiers'
 import { engineModelId } from './engine-client'
 import { dataDir, nodeRunner, resourcesDir } from './paths'
 
@@ -44,7 +44,7 @@ export function renderInstructionsText(settings: AppSettings): string {
 }
 
 const tierSpecFor = (repoId: string): TierSpec | undefined => {
-  const tier = TIER_ORDER.find((t) => TIERS[t].candidates.includes(repoId))
+  const tier = tierOfRepo(repoId) // rename-aware: old-id snapshots keep their tier's limits
   return tier ? TIERS[tier] : undefined
 }
 

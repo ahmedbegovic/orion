@@ -90,7 +90,9 @@ export default function Thread({ conversationId }: Props) {
       ) : (
         <Virtuoso
           style={{ height: '100%' }}
-          className="min-h-0 flex-1"
+          // overflow-x-hidden: content wraps; the thread scrolls down, never
+          // sideways (same guard as the agent Timeline).
+          className="min-h-0 flex-1 overflow-x-hidden"
           data={messages}
           computeItemKey={(_, m: ChatMessage) => m.id}
           initialTopMostItemIndex={messages.length - 1}

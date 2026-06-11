@@ -15,6 +15,8 @@
  * and flip encodesToolHistoryAsText to false.
  */
 
+import type { WireToolCall } from '../engine-client'
+
 export type ModelFamily = 'gemma' | 'qwen' | 'other'
 
 export function familyOf(modelId: string): ModelFamily {
@@ -128,6 +130,35 @@ class PassthroughSplitter implements ContentSplitter {
 
 export function createContentSplitter(family: ModelFamily): ContentSplitter {
   return family === 'gemma' ? new GemmaSplitter() : new PassthroughSplitter()
+}
+
+/**
+ * The text-encoded tool history teaches gemma the literal
+ * `[tool_call] name(args)` shape, and the model sometimes imitates it in
+ * visible content instead of emitting a native call (the engine's own docs
+ * note this history-mimicry mode). Salvage such lines into real calls; only
+ * known tool names qualify, so prose that merely mentions the syntax stays
+ * prose. Returns the cleaned text so the call line isn't re-taught twice
+ * when the round is recorded back into the history.
+ */
+export function salvageTextualToolCalls(
+  text: string,
+  knownTools: ReadonlySet<string>
+): { calls: WireToolCall[]; cleanedText: string } {
+  const calls: WireToolCall[] = []
+  const cleaned = text.replace(
+    /^\[tool_call\]\s+([A-Za-z_][\w.-]*)\s*\((.*)\)\s*$/gm,
+    (line, name: string, args: string) => {
+      if (!knownTools.has(name)) return line
+      calls.push({
+        id: `salvaged-${crypto.randomUUID()}`,
+        type: 'function',
+        function: { name, arguments: args.trim() || '{}' }
+      })
+      return ''
+    }
+  )
+  return calls.length > 0 ? { calls, cleanedText: cleaned.trim() } : { calls, cleanedText: text }
 }
 
 /** Strip thought channels from a complete (non-streamed) gemma response. */

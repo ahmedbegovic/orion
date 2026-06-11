@@ -1,6 +1,20 @@
 import { useState, type ReactNode } from 'react'
 import { Check, FlaskConical } from 'lucide-react'
-import { modelDisplayName, TIERS, TIER_LABELS, TIER_ORDER } from '@shared/model-tiers'
+import {
+  canonicalRepoId,
+  modelDisplayName,
+  TIERS,
+  TIER_LABELS,
+  TIER_ORDER
+} from '@shared/model-tiers'
+
+/**
+ * Selections are canonicalized on read while candidates surface the INSTALLED
+ * (possibly renamed-old) id — compare through the alias map or a pick on an
+ * old-id snapshot could never be cleared.
+ */
+const isPicked = (selection: string | undefined, repoId: string): boolean =>
+  selection !== undefined && canonicalRepoId(selection) === canonicalRepoId(repoId)
 import type {
   CatalogFamily,
   DownloadInfo,
@@ -199,7 +213,7 @@ export default function TierGrid({ overview }: { overview: ModelsOverview }) {
   }
 
   const onSelect = (tier: Tier, repoId: string): void => {
-    const picked = overview.tierSelections[tier] === repoId
+    const picked = isPicked(overview.tierSelections[tier], repoId)
     // Clicking the explicit pick clears it (back to the curated default).
     void setTierSelection(tier, picked ? null : repoId).catch(toastError)
   }
@@ -279,7 +293,7 @@ export default function TierGrid({ overview }: { overview: ModelsOverview }) {
                               key={candidate.repoId}
                               candidate={candidate}
                               active={resolution?.active === candidate.repoId}
-                              picked={overview.tierSelections[tier] === candidate.repoId}
+                              picked={isPicked(overview.tierSelections[tier], candidate.repoId)}
                               engineState={liveState(candidate.repoId, candidate.engineState)}
                               download={activeDownload(candidate.repoId)}
                               partial={partialDownload(candidate.repoId)}

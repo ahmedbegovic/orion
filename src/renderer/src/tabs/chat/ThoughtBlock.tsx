@@ -19,7 +19,9 @@ const ThoughtBlock = memo(function ThoughtBlock({ text, active }: Props) {
           className="text-zinc-600 transition-transform group-open/thought:rotate-180"
         />
       </summary>
-      <div className="select-text whitespace-pre-wrap border-t border-zinc-800/80 px-3 py-2 text-[12px] leading-relaxed text-zinc-500">
+      {/* Bounded height: a long trace scrolls inside the block, so expanding
+          it never breaks the outer timeline's scrolling (v2 feedback). */}
+      <div className="max-h-60 select-text overflow-y-auto whitespace-pre-wrap break-words border-t border-zinc-800/80 px-3 py-2 text-[12px] leading-relaxed text-zinc-500">
         {text}
       </div>
     </details>

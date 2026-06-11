@@ -84,6 +84,21 @@ export const TIER_LABELS: Record<Tier, string> = {
   ultra: 'Ultra'
 }
 
+/**
+ * Curated repo ids that were renamed (old → canonical). The old id may live on
+ * in persisted state (tier selections, old chat messages) or even as a
+ * downloaded snapshot — every comparison against the curated tables goes
+ * through canonicalRepoId() so a rename never strands that state.
+ */
+export const RENAMED_REPOS: Record<string, string> = {
+  // 0.20.0 shipped a repo id that never existed upstream; 928ad4e fixed it.
+  'mlx-community/Qwen3.5-4B-4bit': 'mlx-community/Qwen3.5-4B-MLX-4bit'
+}
+
+export function canonicalRepoId(repoId: string): string {
+  return RENAMED_REPOS[repoId] ?? repoId
+}
+
 /** Curated short names; repos outside the tier table get a prettified id. */
 const MODEL_DISPLAY_NAMES: Record<string, string> = {
   'mlx-community/gemma-4-E2B-it-qat-4bit': 'Gemma 4 E2B',
@@ -99,7 +114,7 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
 
 /** Human name for a repo id — quant/format suffixes stripped, org dropped. */
 export function modelDisplayName(repoId: string): string {
-  const curated = MODEL_DISPLAY_NAMES[repoId]
+  const curated = MODEL_DISPLAY_NAMES[canonicalRepoId(repoId)]
   if (curated) return curated
   const short = (repoId.split('/').pop() ?? repoId)
     // Lookahead keeps keyword-prefixed words intact ('-italian' is not '-it').
@@ -165,13 +180,25 @@ export type ModelFit = 'perfect' | 'good' | 'risky' | 'unable'
 const CURATED_REPOS = new Set(TIER_ORDER.flatMap((tier) => TIERS[tier].candidates))
 
 export function isCuratedRepo(repoId: string): boolean {
-  return CURATED_REPOS.has(repoId)
+  return CURATED_REPOS.has(canonicalRepoId(repoId))
 }
 
 /** Models grid column: curated repos go under their brand, everything else is Experimental. */
 export function familyOf(repoId: string): CatalogFamily {
-  if (!CURATED_REPOS.has(repoId)) return 'experimental'
+  if (!isCuratedRepo(repoId)) return 'experimental'
   return repoId.toLowerCase().includes('gemma') ? 'gemma' : 'qwen'
+}
+
+/** The tier a repo id is curated under (rename-aware); null when not curated. */
+export function tierOfRepo(repoId: string): Tier | null {
+  const id = canonicalRepoId(repoId)
+  return TIER_ORDER.find((t) => TIERS[t].candidates.includes(id)) ?? null
+}
+
+/** The TierSpec a repo id is curated under (rename-aware); undefined when not. */
+export function tierSpecFor(repoId: string): TierSpec | undefined {
+  const tier = tierOfRepo(repoId)
+  return tier ? TIERS[tier] : undefined
 }
 
 /**
@@ -212,4 +239,22 @@ export function fitFor(
   if (ram.availableGB !== null && estGB > ram.availableGB - 2) return 'risky'
   if (estGB > ram.budgetGB * 0.7) return 'good'
   return 'perfect'
+}
+
+// --- module-load consistency checks ------------------------------------------
+// The curated tables are hand-maintained in lockstep; a missed edit must fail
+// the very first dev launch, not degrade silently to a prettified name or a
+// dangling alias. Pure static data: if this passes once it passes always.
+for (const repoId of CURATED_REPOS) {
+  if (!MODEL_DISPLAY_NAMES[repoId]) {
+    throw new Error(`model-tiers: curated repo ${repoId} has no MODEL_DISPLAY_NAMES entry`)
+  }
+}
+for (const [oldId, newId] of Object.entries(RENAMED_REPOS)) {
+  if (!CURATED_REPOS.has(newId)) {
+    throw new Error(`model-tiers: rename target ${newId} (from ${oldId}) is not a curated repo`)
+  }
+  if (CURATED_REPOS.has(oldId)) {
+    throw new Error(`model-tiers: renamed repo ${oldId} must not stay in TIERS`)
+  }
 }

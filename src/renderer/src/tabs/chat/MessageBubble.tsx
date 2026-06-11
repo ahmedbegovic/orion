@@ -117,7 +117,7 @@ function UserMessage({ message, streaming }: { message: ChatMessage; streaming: 
         </div>
       ) : (
         <>
-          <div className="max-w-[80%] select-text whitespace-pre-wrap rounded-2xl rounded-br-md bg-zinc-800 px-3.5 py-2 text-[13.5px] leading-relaxed text-zinc-100">
+          <div className="max-w-[80%] select-text whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-zinc-800 px-3.5 py-2 text-[13.5px] leading-relaxed text-zinc-100">
             {text}
           </div>
           {images.length > 0 && (
@@ -192,8 +192,14 @@ function AssistantMessage({
         switch (part.type) {
           case 'text':
             return <MarkdownPart key={i} text={part.text} />
-          case 'thought':
-            return <ThoughtBlock key={i} text={part.text} active={streaming && i === lastIndex} />
+          case 'thought': {
+            // A whitespace-only thought renders nothing once settled; while
+            // actively streaming it stays as the "Thinking…" indicator.
+            const thinking = streaming && i === lastIndex
+            return part.text.trim() || thinking ? (
+              <ThoughtBlock key={i} text={part.text} active={thinking} />
+            ) : null
+          }
           case 'tool_call':
             return <ToolCallCard key={part.id} call={part} result={resultFor(part.id)} />
           case 'tool_result':

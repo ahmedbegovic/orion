@@ -48,6 +48,16 @@ export interface WebSearchEntry {
   snippet: string
 }
 
+export interface ImageSearchEntry {
+  title: string
+  /** Direct image URL (https-only — the renderer blocks other schemes). */
+  image_url: string
+  /** Page the image came from. */
+  source_url: string
+  width: number | null
+  height: number | null
+}
+
 export interface VisitResult {
   markdown: string
   title: string | null
@@ -168,6 +178,18 @@ export class ToolsClient {
         backend: input.backend ?? 'auto',
         searxng_url: input.searxngUrl
       },
+      bounded(signal)
+    )
+  }
+
+  searchImages(
+    input: { query: string; maxResults?: number },
+    signal?: AbortSignal
+  ): Promise<{ results: ImageSearchEntry[] }> {
+    return this.request(
+      'POST',
+      '/search_images',
+      { query: input.query, max_results: input.maxResults ?? 6 },
       bounded(signal)
     )
   }

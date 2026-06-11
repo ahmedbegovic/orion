@@ -65,6 +65,23 @@ export function builtinToolDefs(opts: BuiltinToolOptions): ChatToolDef[] {
             required: ['url']
           }
         }
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'image_search',
+          description:
+            'Search the web for images. Returns results with a direct image URL and source page. ' +
+            'To show an image to the user, embed it in your reply as Markdown: ![title](image_url) — it renders inline.',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'What to find images of' },
+              max_results: { type: 'integer', description: 'Number of results (default 6)' }
+            },
+            required: ['query']
+          }
+        }
       }
     )
   }
@@ -163,6 +180,25 @@ export async function executeTool(
         sourceIds: [source.id]
       }
     }
+    case 'image_search': {
+      const { results } = await ctx.tools.searchImages(
+        {
+          query: String(args.query ?? ''),
+          maxResults: typeof args.max_results === 'number' ? args.max_results : 6
+        },
+        ctx.signal
+      )
+      if (results.length === 0) return { result: 'No image results.' }
+      const lines = results.map(
+        (r, i) =>
+          `${i + 1}. ${r.title || 'untitled'}\nimage_url: ${r.image_url}\nsource: ${r.source_url}`
+      )
+      return {
+        result:
+          `${lines.join('\n\n')}\n\n` +
+          'To show one inline, embed it as Markdown: ![title](image_url).'
+      }
+    }
     case 'rag_search': {
       if (!ctx.collectionId) throw new Error('no collection attached to this conversation')
       const hits = await ctx.tools.ragQuery(
@@ -188,6 +224,11 @@ export async function executeTool(
     }
     case 'use_skill': {
       const skillName = String(args.name ?? '')
+      // The def's enum only covers chat-enabled skills, but enums are
+      // advisory — enforce the same scope here so a hallucinated name can't
+      // read a coding pack chat was never given.
+      const meta = ctx.skills.list().find((s) => s.name === skillName)
+      if (!meta?.chatEnabled) throw new Error(`unknown skill: ${skillName}`)
       const body = ctx.skills.useSkill(skillName)
       if (body === null) throw new Error(`unknown skill: ${skillName}`)
       return { result: body }

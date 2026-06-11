@@ -374,9 +374,11 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   },
 
   openFile: async (path, opts) => {
+    // Opening a file always returns to the editor — an open diff would
+    // otherwise sit on top until manually closed (v2 feedback).
     const reveal = opts?.line !== undefined ? { path, line: opts.line } : null
     if (get().openFiles.some((f) => f.path === path)) {
-      set({ activePath: path, ...(reveal ? { pendingReveal: reveal } : {}) })
+      set({ activePath: path, diffView: null, ...(reveal ? { pendingReveal: reveal } : {}) })
       return
     }
     const root = get().root
@@ -385,20 +387,21 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     if (get().root !== root) return
     set((s) =>
       s.openFiles.some((f) => f.path === path)
-        ? { activePath: path, ...(reveal ? { pendingReveal: reveal } : {}) } // double-click race
+        ? { activePath: path, diffView: null, ...(reveal ? { pendingReveal: reveal } : {}) } // double-click race
         : {
             openFiles: [
               ...s.openFiles,
               { path, content, savedMtime: mtime, dirty: false, conflict: false }
             ],
             activePath: path,
+            diffView: null,
             ...(reveal ? { pendingReveal: reveal } : {})
           }
     )
   },
 
   setActive: (path) => {
-    if (get().openFiles.some((f) => f.path === path)) set({ activePath: path })
+    if (get().openFiles.some((f) => f.path === path)) set({ activePath: path, diffView: null })
   },
 
   edit: (path, content) => {

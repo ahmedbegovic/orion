@@ -2,7 +2,7 @@ import { copyFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import type { CrispinEvent } from '@shared/ipc'
 import type { AttachmentInput, Conversation, MessagePart, Tier } from '@shared/types'
-import { TIERS, TIER_ORDER } from '@shared/model-tiers'
+import { TIERS, tierOfRepo } from '@shared/model-tiers'
 import type { CrispinDatabase } from '../db'
 import * as settings from '../settings'
 import { dataDir } from '../paths'
@@ -26,6 +26,7 @@ import {
   createContentSplitter,
   encodesToolHistoryAsText,
   familyOf,
+  salvageTextualToolCalls,
   stripThoughts,
   type ModelFamily
 } from './family'
@@ -49,12 +50,16 @@ const IMAGE_MIMES: Record<string, string> = {
 const clip = (text: string, limit: number): string =>
   text.length > limit ? `${text.slice(0, limit)}\n…[truncated]` : text
 
-const visionCapable = (modelId: string): boolean =>
-  TIER_ORDER.some((t) => TIERS[t].candidates.includes(modelId) && TIERS[t].caps.includes('vision'))
+// tierOfRepo is rename-aware: a model installed under a renamed old id keeps
+// its tier's vision capability and output cap instead of degrading to defaults.
+const visionCapable = (modelId: string): boolean => {
+  const tier = tierOfRepo(modelId)
+  return tier !== null && TIERS[tier].caps.includes('vision')
+}
 
 /** Per-request output cap from the model's tier; undefined = engine default. */
 const maxTokensFor = (modelId: string): number | undefined => {
-  const tier = TIER_ORDER.find((t) => TIERS[t].candidates.includes(modelId))
+  const tier = tierOfRepo(modelId)
   return tier ? TIERS[tier].maxOutputTokens : undefined
 }
 
@@ -344,7 +349,9 @@ export class ChatOrchestrator {
       if (controller.signal.aborted) throw new Error('aborted')
 
       const conversation = this.deps.repo.getConversation(conversationId)
-      const skills = this.deps.skills.list()
+      // Chat sees only explicitly opted-in skills — coding packs symlinked for
+      // the Agent/Code tabs must not leak into chat prompts (v2 feedback).
+      const skills = this.deps.skills.list().filter((s) => s.chatEnabled)
       const webEnabled = conversation.webEnabled
       const hasCollection = conversation.collectionId !== null
       const path = this.deps.repo
@@ -368,6 +375,7 @@ export class ChatOrchestrator {
         ...builtinToolDefs({ webEnabled, hasCollection, skills }),
         ...(await this.deps.mcp.toolDefsFor('chat'))
       ]
+      const knownToolNames = new Set(toolDefs.map((d) => d.function.name))
       if (controller.signal.aborted) throw new Error('aborted')
       const toolCtx: ToolExecutionContext = {
         tools: this.deps.tools,
@@ -388,6 +396,7 @@ export class ChatOrchestrator {
 
       let parseErrorLastIteration = false
       let toolBudgetExhausted = false
+      let nudgedEmptyTurn = false
       // <= cap: one extra tools-disabled round so a cap exit still produces an answer.
       for (let iteration = 0; iteration <= MAX_TOOL_ITERATIONS; iteration++) {
         const splitter = createContentSplitter(family)
@@ -422,6 +431,58 @@ export class ChatOrchestrator {
           }
         }
         consume(splitter.flush())
+
+        // Imitated textual tool calls: the text-encoded history teaches gemma
+        // the literal '[tool_call] name(args)' shape and it sometimes emits
+        // that as content instead of a native call — execute those instead of
+        // ending the turn with dead prose. cleanedText keeps the history from
+        // recording the call twice (the round's callText re-encodes it).
+        if (toolCalls.length === 0 && !toolBudgetExhausted && encodesToolHistoryAsText(family)) {
+          const salvage = salvageTextualToolCalls(visibleText, knownToolNames)
+          if (salvage.calls.length > 0) {
+            toolCalls = salvage.calls
+            visibleText = salvage.cleanedText
+          }
+        }
+
+        // Reasoning-only turn: gemma sometimes plans a tool call in its
+        // thinking ("The best tool for this is web_search…") and then stops
+        // without emitting the call or any visible text. One corrective round;
+        // a second empty turn ends the generation as before. The nudge is
+        // appended to the trailing user message when there is one — gemma's
+        // template rejects non-alternating roles.
+        // iteration guard: never trade the budget-exhausted round for a nudge —
+        // the loop's "tools disabled on the final round" invariant must hold.
+        if (
+          toolCalls.length === 0 &&
+          !visibleText.trim() &&
+          !toolBudgetExhausted &&
+          !nudgedEmptyTurn &&
+          iteration < MAX_TOOL_ITERATIONS - 1
+        ) {
+          nudgedEmptyTurn = true
+          // The nudged round runs no tools, so it cannot "fail again" — a
+          // stale parse-error flag from the round before it must not pair
+          // with a later error as 'consecutive' (adversarial-review finding).
+          parseErrorLastIteration = false
+          const nudge =
+            '(Your previous turn produced no reply — only internal thinking. ' +
+            'Continue now: call the tool you decided on, or answer the user directly. ' +
+            'Do not mention this reminder.)'
+          const last = messages[messages.length - 1]
+          if (last && last.role === 'user' && typeof last.content === 'string') {
+            last.content = `${last.content}\n\n${nudge}`
+          } else if (last && last.role === 'user' && Array.isArray(last.content)) {
+            // Vision message: extend its text part rather than appending a
+            // second user turn the alternating template would reject.
+            const textPart = last.content.findLast((p) => p.type === 'text')
+            if (textPart && textPart.type === 'text') textPart.text = `${textPart.text}\n\n${nudge}`
+            else last.content.push({ type: 'text', text: nudge })
+          } else {
+            messages.push({ role: 'user', content: nudge })
+          }
+          continue
+        }
 
         if (toolCalls.length === 0 || toolBudgetExhausted) break
 
@@ -527,6 +588,10 @@ export class ChatOrchestrator {
       } else {
         error = err instanceof Error ? err.message : String(err)
         this.log.warn(`generation failed: ${error}`)
+        // An engine-side failure (e.g. the prefill memory guard) may have
+        // evicted models — reconcile now so the Models tab doesn't show a
+        // stale "Loaded" badge until the next 2.5s poll.
+        void this.deps.modelService.refreshEngineModels().catch(() => {})
       }
     } finally {
       stream.finalize({ tokensIn, tokensOut })
@@ -581,29 +646,11 @@ export class ChatOrchestrator {
 
   /** Requested tier first, then nearest installed below, then above. */
   private resolveModel(tier: Tier): string {
-    const overview = this.deps.modelService.overview()
-    const active = new Map(overview.tiers.map((t) => [t.tier, t.active]))
-    const start = TIER_ORDER.indexOf(tier)
-    const order = [
-      tier,
-      ...TIER_ORDER.slice(0, start).reverse(),
-      ...TIER_ORDER.slice(start + 1)
-    ]
-    for (const candidate of order) {
-      const modelId = active.get(candidate)
-      if (modelId) return modelId
-    }
-    throw new Error('No chat models installed — download one in the Models tab first.')
+    return this.deps.modelService.resolveActiveRepo(tier)
   }
 
-  private async ensureModelLoaded(modelId: string): Promise<void> {
-    const overview = this.deps.modelService.overview()
-    const alreadyLoaded =
-      overview.engine.running &&
-      overview.engine.models.some((m) => m.id === modelId && m.state === 'loaded')
-    if (alreadyLoaded) return
-    const res = await this.deps.modelService.load(modelId)
-    if (!res.ok) throw new Error(res.reason ?? `could not load ${modelId}`)
+  private ensureModelLoaded(modelId: string): Promise<void> {
+    return this.deps.modelService.ensureLoaded(modelId)
   }
 
   // --- message assembly --------------------------------------------------------------

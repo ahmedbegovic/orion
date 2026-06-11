@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useAutosizeTextarea } from '@/lib/useAutosizeTextarea'
 import { Bot, ChevronsLeft, ChevronsRight, Plus, SendHorizontal, Square, Workflow } from 'lucide-react'
 import 'highlight.js/styles/github-dark.css'
 import { FEATURE_DEFAULTS, TIER_LABELS, TIER_ORDER } from '@shared/model-tiers'
@@ -14,7 +15,8 @@ import SkillPicker from '../agent/SkillPicker'
 import { useSlashSkills } from '../agent/useSlashSkills'
 import DiffPermission from './DiffPermission'
 
-const MAX_TEXTAREA_PX = 140
+// Matches the textarea's max-h-36 — the overflow toggle keys off this value.
+const MAX_TEXTAREA_PX = 144
 
 // Mirrors AgentComposer, but defaults to the Code feature tier and fits the
 // narrow panel — the Agent tab's composer is bound to the agent default.
@@ -32,19 +34,14 @@ function PanelComposer({ sessionId }: { sessionId: string }) {
   const [pipelineMode, setPipelineMode] = useState(false)
 
   const [text, setText] = useState('')
-  // null = untouched: main then resolves the user's persisted code default.
-  const [tier, setTier] = useState<Tier | null>(null)
+  // The session's persisted tier survives switches (the composer remounts per
+  // session); null = untouched, main then resolves the persisted code default.
+  const sessionTier = useAgentStore((s) => s.sessions.find((x) => x.id === sessionId)?.tier) ?? null
+  const [tier, setTier] = useState<Tier | null>(sessionTier)
   const defaultTier = useModelsStore((s) => s.overview?.defaults.code) ?? FEATURE_DEFAULTS.code
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const slash = useSlashSkills(text, setText)
-
-  // Autosize after every text commit (covers programmatic clears on send).
-  useEffect(() => {
-    const el = textareaRef.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_PX)}px`
-  }, [text])
+  useAutosizeTextarea(textareaRef, text, MAX_TEXTAREA_PX)
 
   const submit = (): void => {
     const trimmed = text.trim()
@@ -58,7 +55,12 @@ function PanelComposer({ sessionId }: { sessionId: string }) {
     }
     if (pipelineMode) {
       // Narrow panel: commit gate on, docs off (the Agent tab has the toggles).
-      void startPipeline(sessionId, trimmed, { commit: true, docs: false }).catch(restore)
+      // The visible tier pick binds pipeline stages too.
+      void startPipeline(sessionId, trimmed, {
+        commit: true,
+        docs: false,
+        tier: tier ?? undefined
+      }).catch(restore)
       return
     }
     void prompt(sessionId, slash.transformForSubmit(trimmed), tier ?? undefined).catch(restore)

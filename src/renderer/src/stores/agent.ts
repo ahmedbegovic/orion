@@ -203,7 +203,7 @@ interface AgentStore {
   startPipeline: (
     sessionId: string,
     task: string,
-    options: { commit: boolean; docs: boolean; permissionMode?: PermissionMode }
+    options: { commit: boolean; docs: boolean; permissionMode?: PermissionMode; tier?: Tier }
   ) => Promise<void>
   abortPipeline: (pipelineId: string) => Promise<void>
   approvePipeline: (pipelineId: string, approve: boolean) => Promise<void>
@@ -226,6 +226,7 @@ interface AgentStore {
   writeMemory: (name: string, content: string) => Promise<void>
   refreshSkills: () => Promise<void>
   setSkillEnabled: (name: string, enabled: boolean) => Promise<void>
+  setSkillChatEnabled: (name: string, enabled: boolean) => Promise<void>
 }
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
@@ -353,6 +354,22 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
                 (p) => permissionIdOf(p.request) !== permissionId
               )
             }))
+          break
+        }
+        case 'crispin.promptCancelled': {
+          // Stop won the race against a prompt still in its pre-warm: nothing
+          // reached opencode, so quietly drop the optimistic message — no toast.
+          clearBusy(sessionId)
+          set((s) => {
+            const messages = s.messagesBySession[sessionId]
+            if (!messages) return {}
+            return {
+              messagesBySession: {
+                ...s.messagesBySession,
+                [sessionId]: messages.filter((m) => !m.id.startsWith(OPTIMISTIC_PREFIX))
+              }
+            }
+          })
           break
         }
         case 'crispin.promptFailed': {
@@ -505,14 +522,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       completed: true,
       parts: [{ id: 'text', type: 'text', text }]
     }
+    // For the revert below: a rejected IPC means main threw BEFORE persisting
+    // the tier, so the optimistic merge must roll back to this value.
+    const prevTier = get().sessions.find((x) => x.id === sessionId)?.tier ?? null
     set((s) => ({
       busyBySession: { ...s.busyBySession, [sessionId]: true },
       messagesBySession: {
         ...s.messagesBySession,
         [sessionId]: [...(s.messagesBySession[sessionId] ?? []), optimistic]
       },
+      // Mirror main's persistence (incl. the explicit tier) so a composer
+      // remount on session switch restores the right pick without a refetch.
       sessions: s.sessions.map((x) =>
-        x.id === sessionId ? { ...x, lastUsedAt: Date.now() } : x
+        x.id === sessionId ? { ...x, lastUsedAt: Date.now(), ...(tier ? { tier } : {}) } : x
       )
     }))
     try {
@@ -530,7 +552,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           [sessionId]: (s.messagesBySession[sessionId] ?? []).filter(
             (m) => m.id !== optimistic.id
           )
-        }
+        },
+        ...(tier
+          ? {
+              sessions: s.sessions.map((x) =>
+                x.id === sessionId ? { ...x, tier: prevTier } : x
+              )
+            }
+          : {})
       }))
       throw err
     }
@@ -606,6 +635,21 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     } catch (err) {
       set((s) => ({
         skills: s.skills.map((sk) => (sk.name === name ? { ...sk, agentEnabled: !enabled } : sk))
+      }))
+      throw err
+    }
+  },
+
+  setSkillChatEnabled: async (name, enabled) => {
+    // Optimistic toggle; revert if main rejects the marker write.
+    set((s) => ({
+      skills: s.skills.map((sk) => (sk.name === name ? { ...sk, chatEnabled: enabled } : sk))
+    }))
+    try {
+      await call('skills.setChatEnabled', { name, enabled })
+    } catch (err) {
+      set((s) => ({
+        skills: s.skills.map((sk) => (sk.name === name ? { ...sk, chatEnabled: !enabled } : sk))
       }))
       throw err
     }

@@ -198,7 +198,11 @@ export default function TerminalPane({ root, open }: Props) {
         </div>
       </div>
       <div className="relative h-56">
-        <div ref={containerRef} className="absolute inset-0 pl-2 pt-1.5" />
+        {/* Padding lives on .xterm (index.css), NOT here: FitAddon subtracts
+            the terminal element's own padding but measures this container at
+            full height — container padding made fit() overshoot by a row,
+            clipping the bottom line under overflow-hidden (v2 feedback). */}
+        <div ref={containerRef} className="absolute inset-0" />
         {exited && (
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-black/70">
             <p className="text-[12px] text-zinc-500">The shell exited or failed to start.</p>

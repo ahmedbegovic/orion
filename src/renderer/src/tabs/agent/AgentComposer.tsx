@@ -1,14 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { SendHorizontal, Square, Workflow } from 'lucide-react'
 import { FEATURE_DEFAULTS, TIER_LABELS, TIER_ORDER } from '@shared/model-tiers'
 import type { PermissionMode, Tier } from '@shared/types'
 import { useAgentStore } from '@/stores/agent'
 import { useModelsStore } from '@/stores/models'
 import { toastError } from '@/stores/toasts'
+import { useAutosizeTextarea } from '@/lib/useAutosizeTextarea'
 import SkillPicker from './SkillPicker'
 import { useSlashSkills } from './useSlashSkills'
 
-const MAX_TEXTAREA_PX = 180
+// Matches the textarea's max-h-44 — the overflow toggle keys off this value.
+const MAX_TEXTAREA_PX = 176
 
 export const MODE_LABELS: Record<PermissionMode, string> = {
   normal: 'Normal',
@@ -38,19 +40,14 @@ export default function AgentComposer({ sessionId }: Props) {
   const [pipelineDocs, setPipelineDocs] = useState(false)
 
   const [text, setText] = useState('')
-  // null = untouched: main then resolves the user's persisted agent default.
-  const [tier, setTier] = useState<Tier | null>(null)
+  // The session's persisted tier survives switches (the composer remounts per
+  // session); null = untouched, main then resolves the persisted agent default.
+  const sessionTier = useAgentStore((s) => s.sessions.find((x) => x.id === sessionId)?.tier) ?? null
+  const [tier, setTier] = useState<Tier | null>(sessionTier)
   const defaultTier = useModelsStore((s) => s.overview?.defaults.agent) ?? FEATURE_DEFAULTS.agent
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const slash = useSlashSkills(text, setText)
-
-  // Autosize after every text commit (covers programmatic clears on send).
-  useEffect(() => {
-    const el = textareaRef.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_PX)}px`
-  }, [text])
+  useAutosizeTextarea(textareaRef, text, MAX_TEXTAREA_PX)
 
   const submit = (): void => {
     const trimmed = text.trim()
@@ -63,9 +60,12 @@ export default function AgentComposer({ sessionId }: Props) {
       toastError(err)
     }
     if (pipelineMode) {
+      // The visible tier pick binds pipeline stages too — they must not run
+      // on whatever tier an earlier manual prompt persisted.
       void startPipeline(sessionId, trimmed, {
         commit: pipelineCommit,
-        docs: pipelineDocs
+        docs: pipelineDocs,
+        tier: tier ?? undefined
       }).catch(restore)
       return
     }

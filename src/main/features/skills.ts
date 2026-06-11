@@ -9,4 +9,9 @@ export function registerSkillsFeature(skills: SkillsService): void {
     skills.setAgentEnabled(name, enabled)
     return { ok: true }
   })
+
+  handle('skills.setChatEnabled', ({ name, enabled }) => {
+    skills.setChatEnabled(name, enabled)
+    return { ok: true }
+  })
 }

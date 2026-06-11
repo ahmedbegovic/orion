@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync,
 import { join } from 'node:path'
 import type { CrispinEvent } from '@shared/ipc'
 import type { AgentSessionMeta, AgentTab, PermissionMode, Tier } from '@shared/types'
-import { TIER_ORDER } from '@shared/model-tiers'
 import type { CrispinDatabase } from './db'
 import { engineModelId } from './engine-client'
 import type { ModelService } from './model-service'
@@ -23,6 +22,8 @@ interface AgentSessionRow {
   tab: AgentTab
   directory: string
   title: string | null
+  /** Last explicitly chosen model tier; null = follow the feature default. */
+  tier: Tier | null
   created_at: number
   last_used_at: number | null
 }
@@ -32,6 +33,7 @@ const rowToMeta = (row: AgentSessionRow): AgentSessionMeta => ({
   tab: row.tab,
   directory: row.directory,
   title: row.title,
+  tier: row.tier,
   createdAt: row.created_at,
   lastUsedAt: row.last_used_at
 })
@@ -63,6 +65,12 @@ export class AgentService {
   private readonly memoryDir = join(dataDir(), 'memory')
   /** Last prompt's permission mode per session — drives the ask auto-replies. */
   private readonly modeBySession = new Map<string, PermissionMode>()
+  /**
+   * Cancellation token for a prompt still in its pre-warm (per session).
+   * The pre-warm can take minutes; abort() and delete() flip the flag so the
+   * prompt is dropped instead of firing into opencode after the user moved on.
+   */
+  private readonly pendingBySession = new Map<string, { cancelled: boolean }>()
   /** Typed taps on the per-session event stream (pipeline-service). */
   private readonly sessionEventListeners: Array<(sessionId: string, event: unknown) => void> = []
 
@@ -119,7 +127,7 @@ export class AgentService {
   }
 
   async create(directory: string, tier?: Tier, tab: AgentTab = 'agent'): Promise<AgentSessionMeta> {
-    const modelId = this.resolveModel(tier, tab)
+    const modelId = engineModelId(this.resolveRepo(tier, tab))
     const { baseUrl } = await this.deps.pool.ensureServer(directory)
     this.deps.pool.touch(directory)
     const opencodeId = await this.createOpencodeSession(baseUrl, modelId)
@@ -129,15 +137,25 @@ export class AgentService {
       tab,
       directory,
       title: null,
+      tier: tier ?? null,
       created_at: Date.now(),
       last_used_at: null
     }
     this.deps.db
       .prepare(
-        `INSERT INTO agent_sessions (id, opencode_session_id, tab, directory, title, created_at, last_used_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO agent_sessions (id, opencode_session_id, tab, directory, title, tier, created_at, last_used_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(row.id, row.opencode_session_id, row.tab, row.directory, row.title, row.created_at, row.last_used_at)
+      .run(
+        row.id,
+        row.opencode_session_id,
+        row.tab,
+        row.directory,
+        row.title,
+        row.tier,
+        row.created_at,
+        row.last_used_at
+      )
     return rowToMeta(row)
   }
 
@@ -162,23 +180,70 @@ export class AgentService {
    */
   async prompt(sessionId: string, text: string, tier?: Tier, mode?: PermissionMode): Promise<void> {
     const row = this.row(sessionId)
-    const modelId = this.resolveModel(tier, row.tab)
-    const { baseUrl } = await this.deps.pool.ensureServer(row.directory)
+    // Explicit pick > the session's persisted tier > the feature default — a
+    // chat started on High must not jump back to the code default just
+    // because the composer remounted on a session switch.
+    const repoId = this.resolveRepo(tier ?? row.tier ?? undefined, row.tab)
+    const modelId = engineModelId(repoId)
+    await this.deps.pool.ensureServer(row.directory)
     this.deps.pool.touch(row.directory)
     this.modeBySession.set(row.id, mode ?? 'normal')
     this.deps.db
-      .prepare('UPDATE agent_sessions SET last_used_at = ? WHERE id = ?')
-      .run(Date.now(), row.id)
-    void this.firePrompt(row, baseUrl, modelId, text, mode).catch((err: unknown) => {
-      const message = err instanceof Error ? err.message : String(err)
-      this.log.warn(`prompt failed for session ${row.id}: ${message}`)
-      const failed = { type: 'crispin.promptFailed', error: message }
-      this.deps.broadcast({ type: 'agent.event', sessionId: row.id, tab: row.tab, event: failed })
-      this.emitSessionEvent(row.id, failed)
-    })
+      .prepare('UPDATE agent_sessions SET last_used_at = ?, tier = COALESCE(?, tier) WHERE id = ?')
+      .run(Date.now(), tier ?? null, row.id)
+    const pending = { cancelled: false }
+    this.pendingBySession.set(row.id, pending)
+    void (async () => {
+      // opencode talks to the engine directly, so nothing on that path evicts
+      // idle co-residents — a big-tier prompt with the utility model still
+      // loaded trips the engine's prefill memory guard. Warm through load():
+      // it swap-unloads the others exactly like the chat path does.
+      await this.deps.modelService.ensureLoaded(repoId)
+      // The pre-warm can take minutes; everything captured before it is stale
+      // now. Stop and session deletion must win (the prompt was never admitted
+      // to opencode, so abort() had nothing to cancel there), and the pool may
+      // have evicted the session's server — re-resolve instead of fetching a
+      // dead baseUrl or resurrecting a deleted session via the 404 path.
+      if (pending.cancelled) return this.notifyCancelled(row)
+      const fresh = this.rowOrNull(row.id)
+      if (!fresh) return // deleted mid-warm — nothing to prompt
+      const { baseUrl } = await this.deps.pool.ensureServer(fresh.directory)
+      this.deps.pool.touch(fresh.directory)
+      if (pending.cancelled) return this.notifyCancelled(fresh)
+      await this.firePrompt(fresh, baseUrl, modelId, text, mode)
+    })()
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err)
+        if (pending.cancelled) {
+          // The user already stopped this prompt — a late pre-warm failure is
+          // log-worthy, not toast-worthy.
+          this.log.info(`cancelled prompt's pre-warm failed for session ${row.id}: ${message}`)
+          return
+        }
+        this.log.warn(`prompt failed for session ${row.id}: ${message}`)
+        const failed = { type: 'crispin.promptFailed', error: message }
+        this.deps.broadcast({ type: 'agent.event', sessionId: row.id, tab: row.tab, event: failed })
+        this.emitSessionEvent(row.id, failed)
+      })
+      .finally(() => {
+        if (this.pendingBySession.get(row.id) === pending) this.pendingBySession.delete(row.id)
+      })
+  }
+
+  /** Quiet renderer cleanup for a prompt cancelled before opencode admission. */
+  private notifyCancelled(row: AgentSessionRow): void {
+    this.log.info(`prompt cancelled during pre-warm for session ${row.id}`)
+    const event = { type: 'crispin.promptCancelled' }
+    this.deps.broadcast({ type: 'agent.event', sessionId: row.id, tab: row.tab, event })
+    this.emitSessionEvent(row.id, event)
   }
 
   async abort(sessionId: string): Promise<void> {
+    // A prompt still in its pre-warm was never admitted to opencode — the
+    // POST below would abort nothing and the prompt would fire after the
+    // user's Stop. The token makes Stop win.
+    const pending = this.pendingBySession.get(sessionId)
+    if (pending) pending.cancelled = true
     const row = this.row(sessionId)
     const server = this.deps.pool.runningServer(row.directory)
     if (!server) return // no live server — nothing in flight to abort
@@ -211,6 +276,12 @@ export class AgentService {
 
   async delete(sessionId: string): Promise<void> {
     const row = this.row(sessionId)
+    // A prompt mid-pre-warm must not fire after the session is gone — the
+    // 404-recreate path would resurrect an orphan opencode session whose
+    // events route nowhere.
+    const pending = this.pendingBySession.get(sessionId)
+    if (pending) pending.cancelled = true
+    this.pendingBySession.delete(sessionId)
     // Listeners (pipeline) must hear about the deletion — after the row goes,
     // SSE events stop resolving to this session and nothing else tells them.
     this.emitSessionEvent(sessionId, { type: 'crispin.sessionDeleted' })
@@ -268,25 +339,16 @@ export class AgentService {
 
   // --- internals -------------------------------------------------------------------
 
-  /** Requested tier first, then nearest installed below, then above (mirrors chat). */
-  private resolveModel(tier: Tier | undefined, tab: AgentTab): string {
-    const overview = this.deps.modelService.overview()
+  /**
+   * The session's effective HF repo id (engineModelId() flattens it at the
+   * opencode/engine boundary). The tier walk itself is ModelService's shared
+   * resolveActiveRepo — one algorithm for chat/agent/research.
+   */
+  private resolveRepo(tier: Tier | undefined, tab: AgentTab): string {
     // Each surface honors its own persisted feature default.
-    const requested = tier ?? overview.defaults[tab === 'code' ? 'code' : 'agent']
-    const active = new Map(overview.tiers.map((t) => [t.tier, t.active]))
-    const start = TIER_ORDER.indexOf(requested)
-    const order = [
-      requested,
-      ...TIER_ORDER.slice(0, start).reverse(),
-      ...TIER_ORDER.slice(start + 1)
-    ]
-    for (const candidate of order) {
-      const modelId = active.get(candidate)
-      // opencode forwards this verbatim as the OpenAI model param — the
-      // engine knows models by their flattened id, not the HF repo id.
-      if (modelId) return engineModelId(modelId)
-    }
-    throw new Error('No chat models installed — download one in the Models tab first.')
+    const requested =
+      tier ?? this.deps.modelService.overview().defaults[tab === 'code' ? 'code' : 'agent']
+    return this.deps.modelService.resolveActiveRepo(requested)
   }
 
   private async createOpencodeSession(baseUrl: string, modelId: string): Promise<string> {
@@ -340,11 +402,16 @@ export class AgentService {
   }
 
   private row(sessionId: string): AgentSessionRow {
+    const row = this.rowOrNull(sessionId)
+    if (!row) throw new Error(`No such agent session: ${sessionId}`)
+    return row
+  }
+
+  private rowOrNull(sessionId: string): AgentSessionRow | null {
     const row = this.deps.db
       .prepare('SELECT * FROM agent_sessions WHERE id = ?')
       .get(sessionId) as unknown as AgentSessionRow | undefined
-    if (!row) throw new Error(`No such agent session: ${sessionId}`)
-    return row
+    return row ?? null
   }
 
   // --- SSE bridge -------------------------------------------------------------------

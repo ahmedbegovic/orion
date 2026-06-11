@@ -21,6 +21,14 @@ import { scopedLogger } from './logger'
 /** Bump when the bundled packs change — marker-carrying installs get refreshed. */
 const BUNDLED_PACK_VERSION = 1
 const BUNDLED_MARKER = '.crispin-bundled'
+/**
+ * Chat opt-in registry: skills named here are listed in the chat system
+ * prompt. Default OFF — the bundled packs are coding skills and must not leak
+ * into chat thinking (v2 feedback). One JSON file OUTSIDE the pack dirs:
+ * installBundledPacks() rmSync-wipes a bundled pack on version bumps, so a
+ * marker inside the pack would silently lose the user's opt-in on update.
+ */
+const CHAT_ENABLED_FILE = '.chat-enabled.json'
 
 /**
  * Skills are user-authored prompt packs: <dataDir>/skills/<name>/SKILL.md with
@@ -91,6 +99,7 @@ export class SkillsService {
     } catch {
       return []
     }
+    const chatEnabled = this.chatEnabledSet()
     const skills: SkillMeta[] = []
     for (const name of entries) {
       const file = join(this.dir, name, 'SKILL.md')
@@ -101,7 +110,8 @@ export class SkillsService {
         skills.push({
           name: skillName,
           description: frontmatter.description || '',
-          agentEnabled: this.isAgentEnabled(skillName)
+          agentEnabled: this.isAgentEnabled(skillName),
+          chatEnabled: chatEnabled.has(skillName)
         })
       } catch (err) {
         this.log.warn(`skipping skill ${name}: ${err instanceof Error ? err.message : err}`)
@@ -152,6 +162,27 @@ export class SkillsService {
       unlinkSync(link)
     }
     symlinkSync(dir, link, 'dir')
+  }
+
+  /** Registry toggle for the chat surface (agent uses the symlink instead). */
+  setChatEnabled(name: string, enabled: boolean): void {
+    if (!this.dirFor(name)) throw new Error(`No such skill: ${name}`)
+    const set = this.chatEnabledSet()
+    if (enabled) set.add(name)
+    else set.delete(name)
+    writeFileSync(join(this.dir, CHAT_ENABLED_FILE), `${JSON.stringify([...set].sort())}\n`)
+  }
+
+  /** Skill names opted into chat; tolerant of a missing/corrupt registry file. */
+  private chatEnabledSet(): Set<string> {
+    try {
+      const parsed = JSON.parse(readFileSync(join(this.dir, CHAT_ENABLED_FILE), 'utf8')) as unknown
+      return new Set(
+        Array.isArray(parsed) ? parsed.filter((n): n is string => typeof n === 'string') : []
+      )
+    } catch {
+      return new Set()
+    }
   }
 
   /** True when ~/.config/opencode/skills/<name> is a symlink into our skills dir. */

@@ -36,6 +36,11 @@ class VisitRequest(BaseModel):
     max_chars: int = 20_000
 
 
+class ImageSearchRequest(BaseModel):
+    query: str
+    max_results: int = 6
+
+
 def _search_searxng(searxng_url: str, query: str, max_results: int) -> list[dict[str, str]]:
     resp = httpx.get(
         f"{searxng_url.rstrip('/')}/search",
@@ -81,6 +86,26 @@ def search(body: SearchRequest) -> dict[str, Any]:
     raise HTTPException(
         status_code=503, detail={"message": "all search backends failed", "errors": errors}
     )
+
+
+@router.post("/search_images")
+def search_images(body: ImageSearchRequest) -> dict[str, Any]:
+    """ddgs image search; https-only results (the renderer blocks http images)."""
+    try:
+        hits = DDGS().images(body.query, max_results=body.max_results, region="us-en")
+    except Exception as exc:  # noqa: BLE001 — single backend, surface as 503
+        raise HTTPException(status_code=503, detail=str(exc) or type(exc).__name__)
+    results = [
+        {
+            "title": h.get("title") or "",
+            "image_url": h.get("image") or "",
+            "source_url": h.get("url") or "",
+            "width": h.get("width"),
+            "height": h.get("height"),
+        }
+        for h in hits
+    ]
+    return {"results": [r for r in results if str(r["image_url"]).startswith("https://")]}
 
 
 @router.post("/visit")

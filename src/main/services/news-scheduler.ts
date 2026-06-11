@@ -1,6 +1,6 @@
 import type { CrispinEvent } from '@shared/ipc'
 import type { NewsItem, NewsItemStatus, NewsSource, Tier } from '@shared/types'
-import { TIER_ORDER, TIERS } from '@shared/model-tiers'
+import { TIER_ORDER, TIERS, canonicalRepoId } from '@shared/model-tiers'
 import type { CrispinDatabase } from './db'
 import { scopedLogger } from './logger'
 import type { EngineClient } from './engine-client'
@@ -279,10 +279,13 @@ export class NewsScheduler {
    */
   paused(): boolean {
     const ultra = new Set(TIERS.ultra.candidates)
+    // canonicalRepoId: an ultra snapshot under a renamed old id must still
+    // pause the drain — every curated-table comparison is rename-aware.
     return this.deps.modelService
       .overview()
       .engine.models.some(
-        (m) => ultra.has(m.id) && m.id !== this.activeSummarizer && m.state !== 'unloaded'
+        (m) =>
+          ultra.has(canonicalRepoId(m.id)) && m.id !== this.activeSummarizer && m.state !== 'unloaded'
       )
   }
 

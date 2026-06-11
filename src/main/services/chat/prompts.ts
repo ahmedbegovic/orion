@@ -36,6 +36,14 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string {
     )
   }
 
+  if (opts.webEnabled) {
+    sections.push(
+      'When the user asks for photos or pictures, call image_search and embed the best ' +
+        'results directly in your reply as Markdown images (![title](image_url)) — they ' +
+        'render inline. Never claim you cannot provide images.'
+    )
+  }
+
   const citationTools = [
     ...(opts.webEnabled ? ['web_search and web_visit'] : []),
     ...(opts.ragEnabled ? ['rag_search'] : [])

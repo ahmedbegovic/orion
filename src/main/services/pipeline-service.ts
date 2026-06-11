@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import type { CrispinEvent } from '@shared/ipc'
-import type { PermissionMode, PipelineSnapshot, PipelineStageId } from '@shared/types'
+import type { PermissionMode, PipelineSnapshot, PipelineStageId, Tier } from '@shared/types'
 import type { AgentService } from './agent-service'
 import { scopedLogger } from './logger'
 
@@ -14,6 +14,8 @@ export interface PipelineOptions {
   commit: boolean
   docs: boolean
   permissionMode?: PermissionMode
+  /** Model tier for every stage; undefined follows the session/feature default. */
+  tier?: Tier
 }
 
 interface PipelineRun {
@@ -157,7 +159,14 @@ export class PipelineService {
         : stage === 'implement' || stage === 'debug'
           ? run.permissionMode
           : 'normal'
-    await this.deps.agentService.prompt(run.snapshot.sessionId, this.stagePrompt(run, stage), undefined, mode)
+    // The composer's visible tier rides along — stages must not silently run
+    // on whatever tier an earlier manual prompt persisted (review finding).
+    await this.deps.agentService.prompt(
+      run.snapshot.sessionId,
+      this.stagePrompt(run, stage),
+      run.options.tier,
+      mode
+    )
   }
 
   private onSessionEvent(sessionId: string, event: unknown): void {
@@ -177,6 +186,12 @@ export class PipelineService {
 
     if (type === 'crispin.promptFailed') {
       this.fail(run, String((event as { error?: unknown }).error ?? 'prompt failed'))
+      return
+    }
+    // A stage prompt cancelled during its pre-warm (composer Stop) never
+    // reaches opencode — without this the run would idle out after 90 min.
+    if (type === 'crispin.promptCancelled') {
+      this.fail(run, 'The stage prompt was cancelled.')
       return
     }
     if (type === 'session.error') {

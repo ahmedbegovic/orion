@@ -258,6 +258,8 @@ export interface SkillMeta {
   description: string
   /** True when the skill is symlinked into opencode (Agent/Code tabs). */
   agentEnabled: boolean
+  /** True when the skill is opted into the Chat system prompt (default off). */
+  chatEnabled: boolean
 }
 
 /** Which UI surface owns an opencode session. */
@@ -268,6 +270,8 @@ export interface AgentSessionMeta {
   tab: AgentTab
   directory: string
   title: string | null
+  /** Last explicitly chosen model tier — the composer restores it on switch. */
+  tier: Tier | null
   createdAt: number
   lastUsedAt: number | null
 }

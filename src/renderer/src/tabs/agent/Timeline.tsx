@@ -94,7 +94,7 @@ function MessageRow({ message, busy }: { message: AgentMessage; busy: boolean })
       .join('\n\n')
     return (
       <div className="flex justify-end py-2">
-        <div className="max-w-[80%] select-text whitespace-pre-wrap rounded-2xl rounded-br-md bg-zinc-800 px-3.5 py-2 text-[13.5px] leading-relaxed text-zinc-100">
+        <div className="max-w-[80%] select-text whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-zinc-800 px-3.5 py-2 text-[13.5px] leading-relaxed text-zinc-100">
           {text}
         </div>
       </div>
@@ -107,14 +107,16 @@ function MessageRow({ message, busy }: { message: AgentMessage; busy: boolean })
         switch (part.type) {
           case 'text':
             return part.text ? <MarkdownPart key={part.id} text={part.text} /> : null
-          case 'reasoning':
-            return part.text ? (
-              <ThoughtBlock
-                key={part.id}
-                text={part.text}
-                active={busy && !message.completed && part.id === lastId}
-              />
+          case 'reasoning': {
+            // trim(): opencode emits whitespace-only reasoning parts for some
+            // models — an empty "Thoughts" block is just noise (v2 feedback).
+            // While actively streaming it stays visible as the "Thinking…"
+            // indicator (parity with the chat-side MessageBubble).
+            const active = busy && !message.completed && part.id === lastId
+            return part.text?.trim() || active ? (
+              <ThoughtBlock key={part.id} text={part.text ?? ''} active={active} />
             ) : null
+          }
           case 'tool':
             return <ToolPartCard key={part.id} part={part} />
           default:
@@ -173,7 +175,9 @@ export default function Timeline({ sessionId }: Props) {
       ) : (
         <Virtuoso
           style={{ height: '100%' }}
-          className="min-h-0 flex-1"
+          // overflow-x-hidden: content wraps (MarkdownPart breaks long inline
+          // code); the panel must scroll down, never sideways (v2 feedback).
+          className="min-h-0 flex-1 overflow-x-hidden"
           data={visible}
           computeItemKey={(_, m: AgentMessage) => m.id}
           initialTopMostItemIndex={Math.max(0, visible.length - 1)}

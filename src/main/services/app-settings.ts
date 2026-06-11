@@ -1,11 +1,23 @@
 import type { AppSettings, CrispinEvent } from '@shared/ipc'
 import { defaultModulesEnabled } from '@shared/modules'
-import type { Feature } from '@shared/types'
+import { canonicalRepoId } from '@shared/model-tiers'
+import type { Feature, Tier } from '@shared/types'
 import type { CrispinDatabase } from './db'
 import * as settings from './settings'
 
 /** One knob for both the main-side idle sweep and the oMLX TTL backstop. */
 export const DEFAULT_IDLE_UNLOAD_SECONDS = 300
+
+/** Persisted picks survive curated-id renames: map old ids forward on read. */
+const normalizeTierSelections = (
+  raw: Partial<Record<Tier, string>>
+): Partial<Record<Tier, string>> => {
+  const out: Partial<Record<Tier, string>> = {}
+  for (const [tier, repoId] of Object.entries(raw)) {
+    if (repoId) out[tier as Tier] = canonicalRepoId(repoId)
+  }
+  return out
+}
 
 export interface AppSettingsServiceDeps {
   db: CrispinDatabase
@@ -31,7 +43,7 @@ export class AppSettingsService {
       },
       idleUnloadSeconds: settings.get(db, 'models.idleUnloadSeconds', DEFAULT_IDLE_UNLOAD_SECONDS),
       newsTopics: settings.get<string[]>(db, 'news.topics', []),
-      tierSelections: settings.get(db, 'models.tierSelections', {})
+      tierSelections: normalizeTierSelections(settings.get(db, 'models.tierSelections', {}))
     }
   }
 

@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { Loader2, Telescope } from 'lucide-react'
 import { FEATURE_DEFAULTS, TIER_LABELS, TIER_ORDER } from '@shared/model-tiers'
 import type { ResearchMode, Tier } from '@shared/types'
+import { useAutosizeTextarea } from '@/lib/useAutosizeTextarea'
 import { useLibraryStore } from '@/stores/library'
 import { useModelsStore } from '@/stores/models'
 import { useResearchStore } from '@/stores/research'
@@ -13,7 +14,8 @@ const MODE_EXPLAINERS: Record<ResearchMode, string> = {
   heavy: 'Each round is compressed into a mini-report — slower, for broad questions.'
 }
 
-const MAX_TEXTAREA_PX = 120
+// Matches the textarea's max-h-32 — the autosize overflow toggle keys off it.
+const MAX_TEXTAREA_PX = 128
 
 const MANAGE_SENTINEL = '__manage__'
 
@@ -39,13 +41,7 @@ export default function NewResearch() {
   // self-heals on the re-render triggered by the collections store update.
   const validCollectionId = collections.some((c) => c.id === collectionId) ? collectionId : ''
 
-  // Autosize after every text commit (covers programmatic clears on start).
-  useEffect(() => {
-    const el = textareaRef.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_PX)}px`
-  }, [question])
+  useAutosizeTextarea(textareaRef, question, MAX_TEXTAREA_PX)
 
   const submit = (): void => {
     const trimmed = question.trim()

@@ -18,13 +18,15 @@ import {
   FEATURE_DEFAULTS,
   TIERS,
   TIER_ORDER,
+  canonicalRepoId,
   classifyByParams,
   estimateGB,
   familyOf,
   fitFor,
   isCuratedRepo,
-  validateModelRepo,
-  type TierSpec
+  tierOfRepo,
+  tierSpecFor,
+  validateModelRepo
 } from '@shared/model-tiers'
 import type { CrispinDatabase } from './db'
 import * as settings from './settings'
@@ -62,11 +64,6 @@ const registryKey = (entries: EngineConfigModel[]): string =>
       .map((e): [string, number] => [e.name, e.maxTokens])
       .sort((a, b) => a[0].localeCompare(b[0]))
   )
-
-const tierSpecFor = (repoId: string): TierSpec | undefined => {
-  const tier = TIER_ORDER.find((t) => TIERS[t].candidates.includes(repoId))
-  return tier ? TIERS[tier] : undefined
-}
 
 interface DownloadRow {
   id: string
@@ -119,8 +116,17 @@ export class ModelService {
   private pendingRegistryRestart = false
   /** downloadId → tools job id, for every download we're actively polling. */
   private readonly activeDownloads = new Map<string, string>()
+  /**
+   * repoId → in-flight startDownload. Set synchronously before any await:
+   * the dedup SELECT below can't see a sibling call that hasn't INSERTed its
+   * row yet, and the upstream existence probe stretches that window to
+   * seconds — a double-click must join, not race a duplicate snapshot job.
+   */
+  private readonly startingDownloads = new Map<string, Promise<string>>()
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private tick = 0
+  /** Consecutive /v1/models/status failures — see pollTick's stale-state guard. */
+  private modelsPollFailures = 0
   private disposed = false
   private readonly log = scopedLogger('models')
   /** Resolved once init()'s first installed-model scan has finished (see whenReady). */
@@ -348,6 +354,18 @@ export class ModelService {
   // --- downloads ------------------------------------------------------------
 
   async startDownload(repoId: string, force = false): Promise<string> {
+    const inFlight = this.startingDownloads.get(repoId)
+    if (inFlight) return inFlight
+    const task = this.doStartDownload(repoId, force)
+    this.startingDownloads.set(repoId, task)
+    try {
+      return await task
+    } finally {
+      this.startingDownloads.delete(repoId)
+    }
+  }
+
+  private async doStartDownload(repoId: string, force: boolean): Promise<string> {
     if (!force) {
       const verdict = validateModelRepo(repoId)
       if (!verdict.ok) throw new Error(verdict.warning)
@@ -360,6 +378,8 @@ export class ModelService {
       )
       .get(repoId) as { id: string } | undefined
     if (existing && this.activeDownloads.has(existing.id)) return existing.id
+    // After the local dedup: the join path must never pay a network probe.
+    await this.assertRepoExists(repoId)
     const { job_id } = await this.deps.tools.downloadModel(repoId)
     const download: DownloadInfo = {
       id: crypto.randomUUID(),
@@ -380,6 +400,31 @@ export class ModelService {
     this.deps.broadcast({ type: 'models.downloadProgress', download })
     void this.pollDownload(download, job_id)
     return download.id
+  }
+
+  /**
+   * Fail fast on a repo id that doesn't exist upstream — the 0.20.0 Qwen 4B
+   * typo shipped because nothing checked until the sidecar job failed seconds
+   * later with an opaque error. Anonymous HF requests answer 401 for BOTH
+   * missing and private repos (anti-enumeration; live-verified — there is no
+   * anonymous 404), and neither is downloadable without a token, so 401 is
+   * the fail-fast signal; gated-but-public repos answer 200. Anything else
+   * (offline, 5xx, 429) defers to the download job as the authority.
+   */
+  private async assertRepoExists(repoId: string): Promise<void> {
+    let status: number
+    try {
+      const res = await fetch(`https://huggingface.co/api/models/${repoId}`, {
+        method: 'HEAD',
+        signal: AbortSignal.timeout(4000)
+      })
+      status = res.status
+    } catch {
+      return
+    }
+    if (status === 401 || status === 404) {
+      throw new Error(`${repoId} was not found on Hugging Face (or is private) — check the repo id.`)
+    }
   }
 
   private async pollDownload(download: DownloadInfo, jobId: string): Promise<void> {
@@ -487,15 +532,41 @@ export class ModelService {
 
     await this.ensureEngineRunning()
     // If a registry change was deferred (engine was busy), the running engine
-    // was spawned without this model and warm() would 404. An explicit Load
-    // overrides the idle-deferral: apply the registry now.
+    // may have been spawned without this model and warm() would 404. An
+    // explicit Load applies the registry now — but only when the restart is
+    // actually needed for THIS repo and the engine is idle: every surface's
+    // prompt funnels through here, and an unguarded restart would kill
+    // another surface's in-flight generation (adversarial-review finding).
     if (registryKey(this.registryEntries()) !== this.appliedRegistryKey) {
-      this.pendingRegistryRestart = false
-      await this.deps.processManager.get('engine')?.restart('apply registry for explicit load')
-      await this.ensureEngineRunning()
+      const engineKnowsRepo = this.engineModels.some((m) => m.id === repoId)
+      if (!engineKnowsRepo) {
+        if (!(await this.engineIdle())) {
+          this.pendingRegistryRestart = true
+          return {
+            ok: false,
+            reason: 'A generation is running — the engine picks up the new model when it finishes.'
+          }
+        }
+        this.pendingRegistryRestart = false
+        await this.deps.processManager.get('engine')?.restart('apply registry for explicit load')
+        await this.ensureEngineRunning()
+      }
+      // The engine already serves this repo: the drift concerns other
+      // models/settings — leave it to the idle-deferral instead of restarting.
     }
     await this.deps.engine.warm(repoId)
     return { ok: true }
+  }
+
+  /** Pre-warm with swap semantics; no-op when already resident. The single
+   *  shared implementation behind chat/agent/research prompts. */
+  async ensureLoaded(repoId: string): Promise<void> {
+    const resident =
+      this.engineProcessRunning() &&
+      this.engineModels.some((m) => m.id === repoId && m.state === 'loaded')
+    if (resident) return
+    const res = await this.load(repoId)
+    if (!res.ok) throw new Error(res.reason ?? `could not load ${repoId}`)
   }
 
   /**
@@ -633,9 +704,13 @@ export class ModelService {
     if (repoId === null) {
       delete next[tier]
     } else {
-      const model = this.installed.find((m) => m.repoId === repoId)
+      // Alias-aware like resolveTier: a renamed id and its canonical form are
+      // the same logical model for both halves of this validation.
+      const model = this.installed.find(
+        (m) => canonicalRepoId(m.repoId) === canonicalRepoId(repoId)
+      )
       if (!model) throw new Error(`${repoId} is not downloaded`)
-      if (!TIERS[tier].candidates.includes(repoId) && classifyByParams(repoId, model.sizeBytes) !== tier) {
+      if (tierOfRepo(repoId) !== tier && classifyByParams(repoId, model.sizeBytes) !== tier) {
         throw new Error(`${repoId} does not belong to the ${tier} tier`)
       }
       next[tier] = repoId
@@ -655,36 +730,64 @@ export class ModelService {
     return { ...FEATURE_DEFAULTS, ...overrides }
   }
 
+  /**
+   * Requested tier's active model first, then nearest installed below, then
+   * above. The single shared walk behind chat/agent/research model picks.
+   */
+  resolveActiveRepo(tier: Tier): string {
+    const active = new Map(TIER_ORDER.map((t) => [t, this.resolveTier(t).active]))
+    const start = TIER_ORDER.indexOf(tier)
+    const order = [tier, ...TIER_ORDER.slice(0, start).reverse(), ...TIER_ORDER.slice(start + 1)]
+    for (const candidate of order) {
+      const repoId = active.get(candidate)
+      if (repoId) return repoId
+    }
+    throw new Error('No chat models installed — download one in the Models tab first.')
+  }
+
   private resolveTier(tier: Tier): TierResolution {
     const ram = this.deps.ramGuard.report(0)
     const curated = TIERS[tier].candidates
     // HF-downloaded repos outside every curated list join their classified
     // tier — this is what makes arbitrary downloads loadable and selectable.
+    // isCuratedRepo is rename-aware, so a snapshot under a renamed old id
+    // counts as curated (it fills its slot below) instead of going
+    // experimental and appearing twice.
     const experimental = this.installed
       .filter((m) => !isCuratedRepo(m.repoId))
       .filter((m) => classifyByParams(m.repoId, m.sizeBytes) === tier)
       .map((m) => m.repoId)
     const candidates = [...curated, ...experimental].map((repoId) => {
-      const model = this.installed.find((m) => m.repoId === repoId)
-      const estGB = estimateGB(repoId, model?.sizeBytes) ?? TIERS[tier].approxGB
+      // Exact id first, then alias match: weights downloaded under a renamed
+      // old id satisfy the curated slot. Surface the INSTALLED id — the engine
+      // discovered the snapshot under that id, so load/unload/requests must
+      // use it.
+      const model =
+        this.installed.find((m) => m.repoId === repoId) ??
+        this.installed.find((m) => canonicalRepoId(m.repoId) === canonicalRepoId(repoId))
+      const effectiveId = model?.repoId ?? repoId
+      const estGB = estimateGB(effectiveId, model?.sizeBytes) ?? TIERS[tier].approxGB
       return {
-        repoId,
+        repoId: effectiveId,
         installed: model !== undefined,
-        engineState: this.engineModels.find((m) => m.id === repoId)?.state ?? null,
-        family: familyOf(repoId),
+        engineState: this.engineModels.find((m) => m.id === effectiveId)?.state ?? null,
+        family: familyOf(effectiveId),
         estGB: round2(estGB),
         fit: fitFor(estGB, ram)
       }
     })
     // Explicit pick first (when still installed); else first installed curated.
+    // Both comparisons go through canonicalRepoId so a persisted pick of a
+    // renamed id keeps resolving to the same logical model.
     const selection = this.deps.appSettings.tierSelections()[tier]
-    const picked =
-      selection && candidates.some((c) => c.repoId === selection && c.installed)
-        ? selection
-        : null
+    const picked = selection
+      ? (candidates.find(
+          (c) => canonicalRepoId(c.repoId) === canonicalRepoId(selection) && c.installed
+        )?.repoId ?? null)
+      : null
     const active =
       picked ??
-      candidates.find((c) => c.installed && curated.includes(c.repoId))?.repoId ??
+      candidates.find((c) => c.installed && curated.includes(canonicalRepoId(c.repoId)))?.repoId ??
       null
     return { tier, candidates, active }
   }
@@ -731,6 +834,33 @@ export class ModelService {
     this.pollTimer = setInterval(() => void this.pollTick(), ENGINE_POLL_MS)
   }
 
+  /**
+   * One immediate reconcile against /v1/models/status, outside the 2.5s
+   * cadence. Generation error paths call this so an engine-side unload
+   * (memory-pressure eviction, TTL) is reflected in the UI right away.
+   */
+  async refreshEngineModels(): Promise<void> {
+    if (this.disposed || !this.engineProcessRunning()) return
+    try {
+      this.engineModels = await this.deps.engine.models()
+      this.modelsPollFailures = 0
+    } catch {
+      return // the poller keeps owning the failure path
+    }
+    if (this.disposed) return
+    this.broadcastEngineStatusIfChanged()
+  }
+
+  /** Shared change-detection + broadcast for pollTick and refreshEngineModels. */
+  private broadcastEngineStatusIfChanged(): void {
+    const status = this.engineStatus()
+    const key = JSON.stringify(status)
+    if (key !== this.lastEngineKey) {
+      this.lastEngineKey = key
+      this.deps.broadcast({ type: 'models.statusChanged', engine: status })
+    }
+  }
+
   private async pollTick(): Promise<void> {
     this.tick += 1
     const running = this.engineProcessRunning()
@@ -738,8 +868,18 @@ export class ModelService {
     if (running) {
       try {
         this.engineModels = await this.deps.engine.models()
+        this.modelsPollFailures = 0
       } catch {
-        // transient — the process manager's health loop owns liveness
+        // Transient — the process manager's health loop owns liveness. But
+        // after ~3 straight failures stop claiming anything is loaded: a
+        // wedged status endpoint (e.g. right after a prefill OOM) must not
+        // leave a stale "Loaded" badge in the Models tab. The next good poll
+        // restores the truth either way.
+        if (++this.modelsPollFailures >= 3) {
+          this.engineModels = this.engineModels.map((m) =>
+            m.state === 'loaded' ? { ...m, state: 'unloaded', memoryGB: null } : m
+          )
+        }
       }
     } else if (this.engineModels.length > 0) {
       this.engineModels = []
@@ -749,12 +889,7 @@ export class ModelService {
     // deferred-restart handling once shutdown has begun.
     if (this.disposed) return
 
-    const status = this.engineStatus()
-    const key = JSON.stringify(status)
-    if (key !== this.lastEngineKey) {
-      this.lastEngineKey = key
-      this.deps.broadcast({ type: 'models.statusChanged', engine: status })
-    }
+    this.broadcastEngineStatusIfChanged()
 
     // Every 2nd tick (5s) — the only cadence while the engine is down.
     if (this.tick % 2 === 0) {
