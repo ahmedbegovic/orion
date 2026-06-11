@@ -9,9 +9,8 @@ import type { ModelService } from './model-service'
 import type { AppSettingsService } from './app-settings'
 import { familyOf, stripThoughts } from './chat/family'
 
-const FETCH_INTERVAL_MS = 30 * 60_000
-/** First cycle waits out the sidecar boot instead of racing it. */
-const BOOT_FETCH_DELAY_MS = 30_000
+/** Fetch-on-open: opening the News tab refreshes when the last cycle is older. */
+const FRESH_MAX_AGE_MS = 15 * 60_000
 const DEFAULT_ITEMS_LIMIT = 200
 /** Article body budget: the visit() extraction cap and the summary prompt clip. */
 const ARTICLE_MAX_CHARS = 12_000
@@ -71,6 +70,8 @@ interface ItemRow {
   summary: string | null
   status: NewsItemStatus
   read_at: number | null
+  image_url: string | null
+  archived_at: number | null
   created_at: number
 }
 
@@ -96,6 +97,8 @@ const rowToItem = (row: ItemListRow): NewsItem => ({
   summary: row.summary,
   status: row.status,
   readAt: row.read_at,
+  imageUrl: row.image_url,
+  archivedAt: row.archived_at,
   createdAt: row.created_at
 })
 
@@ -120,8 +123,6 @@ export interface NewsSchedulerDeps {
 export class NewsScheduler {
   private readonly log = scopedLogger('news')
   private disposed = false
-  private bootTimer: ReturnType<typeof setTimeout> | null = null
-  private fetchTimer: ReturnType<typeof setInterval> | null = null
   /** Single-flight guards: at most one fetch cycle and one drain at a time. */
   private fetching = false
   private draining = false
@@ -131,27 +132,38 @@ export class NewsScheduler {
   private loopAbort: AbortController | null = null
   /** Model the drain itself loaded for summaries — exempt from paused(). */
   private activeSummarizer: string | null = null
+  /** Unix ms of the last fetch cycle START — ensureFresh's staleness clock. */
+  private lastCycleAt = 0
 
   constructor(private readonly deps: NewsSchedulerDeps) {}
 
+  /**
+   * No boot or interval fetches (fetch-on-open instead, see ensureFresh):
+   * init only repairs statuses and drains leftovers from the previous run.
+   */
   init(): void {
     // Extractions from a previous app run died with their loop — re-queue them.
     // pending_summary needs no repair: the drain picks it up where it stood.
     this.deps.db.prepare("UPDATE news_items SET status = 'new' WHERE status = 'extracting'").run()
-    this.bootTimer = setTimeout(() => void this.runCycle(), BOOT_FETCH_DELAY_MS)
-    this.fetchTimer = setInterval(() => void this.runCycle(), FETCH_INTERVAL_MS)
-    this.kickProcessing() // drain whatever the previous run left behind
+    this.kickProcessing()
   }
 
   dispose(): void {
     this.disposed = true
-    if (this.bootTimer) clearTimeout(this.bootTimer)
-    if (this.fetchTimer) clearInterval(this.fetchTimer)
-    this.bootTimer = null
-    this.fetchTimer = null
     // Aborts the in-flight visit/generation; statuses self-heal via init().
     this.loopAbort?.abort()
     this.loopAbort = null
+  }
+
+  /** Opening the News tab fetches — but only when the last cycle has gone stale. */
+  ensureFresh(maxAgeMs = FRESH_MAX_AGE_MS): void {
+    if (Date.now() - this.lastCycleAt <= maxAgeMs) return
+    void this.runCycle()
+  }
+
+  /** Process leftover items without fetching — the tools-running boot hook. */
+  drainPending(): void {
+    this.kickProcessing()
   }
 
   // --- sources ----------------------------------------------------------------------
@@ -200,16 +212,44 @@ export class NewsScheduler {
 
   // --- items ---------------------------------------------------------------------------
 
-  items(limit = DEFAULT_ITEMS_LIMIT): NewsItem[] {
+  items(opts: { limit?: number; query?: string; archived?: boolean } = {}): NewsItem[] {
+    const where: string[] = [
+      opts.archived ? 'i.archived_at IS NOT NULL' : 'i.archived_at IS NULL'
+    ]
+    const params: Array<string | number> = []
+    const query = opts.query?.trim()
+    if (query) {
+      // Literal substring match — escape LIKE's wildcards in the user's text.
+      const escaped = `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
+      where.push(
+        "(i.title LIKE ? ESCAPE '\\' OR i.summary LIKE ? ESCAPE '\\' OR i.extracted_text LIKE ? ESCAPE '\\')"
+      )
+      params.push(escaped, escaped, escaped)
+    }
     const rows = this.deps.db
       .prepare(
         `SELECT i.*, s.title AS source_title FROM news_items i
          JOIN news_sources s ON s.id = i.source_id
+         WHERE ${where.join(' AND ')}
          ORDER BY (i.read_at IS NULL) DESC, COALESCE(i.published_at, i.created_at) DESC
          LIMIT ?`
       )
-      .all(limit) as unknown as ItemListRow[]
+      .all(...params, opts.limit ?? DEFAULT_ITEMS_LIMIT) as unknown as ItemListRow[]
     return rows.map(rowToItem)
+  }
+
+  archive(id: string): void {
+    const { changes } = this.deps.db
+      .prepare('UPDATE news_items SET archived_at = ? WHERE id = ? AND archived_at IS NULL')
+      .run(Date.now(), id)
+    if (Number(changes) > 0) this.broadcastUpdated()
+  }
+
+  archiveAll(): void {
+    const { changes } = this.deps.db
+      .prepare('UPDATE news_items SET archived_at = ? WHERE archived_at IS NULL')
+      .run(Date.now())
+    if (Number(changes) > 0) this.broadcastUpdated()
   }
 
   /** Full extracted article body for the reader view; stamps read_at once. */
@@ -260,13 +300,16 @@ export class NewsScheduler {
 
   private async runCycle(): Promise<void> {
     if (this.disposed) return
+    // A disabled News module must not burn cycles (or model time) in the background.
+    if (!this.deps.appSettings.moduleEnabled('news')) return
     if (this.fetching) {
       // A source added (or refresh hit) mid-cycle missed this run's source
-      // snapshot — go again right after rather than waiting out the interval.
+      // snapshot — go again right after rather than waiting for the next open.
       this.refetch = true
       return
     }
     this.fetching = true
+    this.lastCycleAt = Date.now()
     try {
       const sources = this.deps.db
         .prepare('SELECT * FROM news_sources WHERE enabled = 1 ORDER BY rowid')
@@ -329,12 +372,25 @@ export class NewsScheduler {
       .run(res.etag, res.last_modified, res.feed_title, now, source.id)
     const titleBackfilled = source.title === null && res.feed_title !== null
 
+    // Topic filter: cheap keyword match over title+RSS summary, no model call.
+    // Every word of a multi-word topic must appear; empty topics keep everything.
+    const topics = this.deps.appSettings
+      .newsTopics()
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean)
+    const matchesTopics = (entry: { title: string | null; summary: string | null }): boolean => {
+      if (topics.length === 0) return true
+      const hay = `${entry.title ?? ''} ${entry.summary ?? ''}`.toLowerCase()
+      return topics.some((topic) => topic.split(/\s+/).every((word) => hay.includes(word)))
+    }
+
     const insert = this.deps.db.prepare(
-      `INSERT OR IGNORE INTO news_items (id, source_id, guid, url, title, published_at, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'new', ?)`
+      `INSERT OR IGNORE INTO news_items (id, source_id, guid, url, title, published_at, image_url, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?)`
     )
     let inserted = 0
     for (const entry of res.entries) {
+      if (!matchesTopics(entry)) continue
       const canon = canonicalUrl(entry.link)
       // The same story syndicated by another source (or re-guid'd by this one)
       // is already tracked — skip it. Re-seen guids no-op via INSERT OR IGNORE.
@@ -346,6 +402,7 @@ export class NewsScheduler {
         entry.link,
         entry.title,
         entry.published_ms,
+        entry.image_url,
         now
       )
       if (Number(changes) > 0) {
@@ -407,9 +464,10 @@ export class NewsScheduler {
         const res = await this.deps.tools.visit(item.url, ARTICLE_MAX_CHARS, signal)
         this.deps.db
           .prepare(
-            "UPDATE news_items SET extracted_text = ?, title = COALESCE(title, ?), status = 'pending_summary' WHERE id = ?"
+            // og:image beats the RSS thumbnail when present (COALESCE keeps the thumb otherwise).
+            "UPDATE news_items SET extracted_text = ?, title = COALESCE(title, ?), image_url = COALESCE(?, image_url), status = 'pending_summary' WHERE id = ?"
           )
-          .run(res.markdown, res.title, item.id)
+          .run(res.markdown, res.title, res.image_url, item.id)
       } catch (err) {
         if (signal.aborted) return // stays 'extracting'; init() re-queues next boot
         this.log.warn(`extract failed for ${item.url}: ${err instanceof Error ? err.message : err}`)

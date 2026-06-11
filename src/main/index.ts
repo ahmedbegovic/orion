@@ -126,9 +126,10 @@ const processManager = new ProcessManager((snapshot) => {
   broadcast({ type: 'system.processState', process: snapshot })
   // The exact event the news drain's waitForTools polls for — its ~30s budget
   // loses to the packaged first boot (uv sync, up to 600s); the kick is
-  // idempotent (single-flight guards + conditional GETs) and covers restarts.
+  // idempotent (single-flight guard) and covers restarts. Drain only — boot
+  // never fetches; opening the News tab does (ensureFresh).
   if (snapshot.name === 'tools' && snapshot.state === 'running') {
-    void newsScheduler?.refresh()
+    newsScheduler?.drainPending()
   }
 })
 

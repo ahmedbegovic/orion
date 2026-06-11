@@ -338,6 +338,9 @@ export const newsItemSchema = z.object({
   summary: z.string().nullable(),
   status: z.enum(['new', 'extracting', 'pending_summary', 'summarized', 'failed']),
   readAt: z.number().nullable(),
+  /** RSS thumbnail at insert, og:image after extraction; https-gated renderer-side. */
+  imageUrl: z.string().nullable(),
+  archivedAt: z.number().nullable(),
   createdAt: z.number()
 })
 
@@ -773,8 +776,29 @@ export const contract = {
   },
   'news.items': {
     /** Unread first, newest first; paused = summaries waiting on the ultra model. */
-    input: z.object({ limit: z.number().optional() }).optional(),
+    input: z
+      .object({
+        limit: z.number().optional(),
+        /** Literal substring over title/summary/extracted text. */
+        query: z.string().optional(),
+        /** True = archived items only; default excludes archived. */
+        archived: z.boolean().optional()
+      })
+      .optional(),
     output: z.object({ items: z.array(newsItemSchema), paused: z.boolean() })
+  },
+  'news.archive': {
+    input: z.object({ id: z.string() }),
+    output: z.object({ ok: z.boolean() })
+  },
+  'news.archiveAll': {
+    input: z.undefined(),
+    output: z.object({ ok: z.boolean() })
+  },
+  'news.opened': {
+    /** News tab became visible — fetch when the last cycle is stale (15 min). */
+    input: z.undefined(),
+    output: z.object({ ok: z.boolean() })
   },
   'news.read': {
     /** Full extracted article body for the reader view; marks the item read. */

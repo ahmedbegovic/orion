@@ -45,6 +45,18 @@ export default function ReaderView({ item }: Props) {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto max-w-2xl">
+          {item.imageUrl !== null && /^https:/i.test(item.imageUrl) && (
+            <img
+              src={item.imageUrl}
+              alt=""
+              loading="lazy"
+              referrerPolicy="no-referrer"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none'
+              }}
+              className="mb-5 max-h-72 w-full rounded-xl object-cover"
+            />
+          )}
           <h1 className="select-text text-[19px] font-semibold leading-snug text-zinc-100">
             {item.title ?? item.url ?? 'Untitled'}
           </h1>

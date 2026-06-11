@@ -15,6 +15,10 @@ interface NewsStore {
   readerMarkdown: Record<string, string | null>
   /** Manual feed refresh in flight (header spinner). */
   refreshing: boolean
+  /** Header search — items refetch with it as a LIKE filter. */
+  query: string
+  /** True = browsing the archive instead of the live list. */
+  showArchived: boolean
   initialized: boolean
   init: () => Promise<void>
   /** Authoritative re-pull of items + sources (also the news.updated handler). */
@@ -29,6 +33,12 @@ interface NewsStore {
   markAllRead: () => Promise<void>
   /** Kick a manual fetch cycle across all enabled sources. */
   refreshFeeds: () => Promise<void>
+  /** The tab became visible — main fetches if the last cycle is stale. */
+  opened: () => Promise<void>
+  setQuery: (query: string) => Promise<void>
+  setShowArchived: (show: boolean) => Promise<void>
+  archive: (id: string) => Promise<void>
+  archiveAll: () => Promise<void>
 }
 
 export const useNewsStore = create<NewsStore>((set, get) => ({
@@ -39,6 +49,8 @@ export const useNewsStore = create<NewsStore>((set, get) => ({
   selectedItem: null,
   readerMarkdown: {},
   refreshing: false,
+  query: '',
+  showArchived: false,
   initialized: false,
 
   init: async () => {
@@ -60,8 +72,9 @@ export const useNewsStore = create<NewsStore>((set, get) => ({
   },
 
   refresh: async () => {
+    const { query, showArchived } = get()
     const [{ items, paused }, { sources }] = await Promise.all([
-      call('news.items', {}),
+      call('news.items', { query: query || undefined, archived: showArchived || undefined }),
       call('news.sources')
     ])
     set((s) => {
@@ -152,5 +165,35 @@ export const useNewsStore = create<NewsStore>((set, get) => ({
     } finally {
       set({ refreshing: false })
     }
+  },
+
+  opened: async () => {
+    // Fire-and-forget: a stale cycle fetches and lands via news.updated.
+    await call('news.opened')
+  },
+
+  setQuery: async (query) => {
+    set({ query })
+    await get().refresh()
+  },
+
+  setShowArchived: async (show) => {
+    set({ showArchived: show, selectedItemId: null, selectedItem: null })
+    await get().refresh()
+  },
+
+  archive: async (id) => {
+    // Optimistic: the card disappears immediately; news.updated confirms.
+    set((s) => ({
+      items: s.items.filter((i) => i.id !== id),
+      selectedItemId: s.selectedItemId === id ? null : s.selectedItemId,
+      selectedItem: s.selectedItem?.id === id ? null : s.selectedItem
+    }))
+    await call('news.archive', { id })
+  },
+
+  archiveAll: async () => {
+    await call('news.archiveAll')
+    await get().refresh()
   }
 }))

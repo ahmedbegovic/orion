@@ -38,6 +38,8 @@ export interface ExtractResult {
   markdown: string
   title: string | null
   kind: string
+  /** og:image for url/html extractions; null for file kinds. */
+  image_url: string | null
 }
 
 export interface WebSearchEntry {
@@ -50,6 +52,8 @@ export interface VisitResult {
   markdown: string
   title: string | null
   url: string
+  /** og:image when the page declares one (absolute http(s) only). */
+  image_url: string | null
 }
 
 export interface NewsFeedEntry {
@@ -58,6 +62,8 @@ export interface NewsFeedEntry {
   link: string | null
   published_ms: number | null
   summary: string | null
+  /** RSS media:thumbnail / image media:content / image enclosure. */
+  image_url: string | null
 }
 
 export interface NewsFetchResult {

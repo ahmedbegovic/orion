@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import httpx
 import pymupdf
@@ -49,8 +50,19 @@ class ExtractRequest(BaseModel):
     url: Optional[str] = None
 
 
-def extract_html(html: str, url: Optional[str] = None) -> tuple[str, Optional[str]]:
-    """Article markdown + title from raw html; shared by /extract and /visit."""
+def _http_image(raw: Any) -> Optional[str]:
+    """og:image candidates, but only absolute http(s) URLs."""
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        split = urlsplit(raw)
+    except ValueError:
+        return None
+    return raw if split.scheme in ("http", "https") and split.netloc else None
+
+
+def extract_html(html: str, url: Optional[str] = None) -> tuple[str, Optional[str], Optional[str]]:
+    """Article markdown + title + og:image from raw html; shared by /extract and /visit."""
     markdown = trafilatura.extract(
         html,
         url=url,
@@ -65,10 +77,12 @@ def extract_html(html: str, url: Optional[str] = None) -> tuple[str, Optional[st
         )
     # with_metadata=True or .title stays None (trafilatura 2.x default is off).
     meta = trafilatura.bare_extraction(html, url=url, with_metadata=True)
-    return markdown, meta.title if meta is not None else None
+    title = meta.title if meta is not None else None
+    image_url = _http_image(getattr(meta, "image", None)) if meta is not None else None
+    return markdown, title, image_url
 
 
-def extract_url(url: str) -> tuple[str, Optional[str]]:
+def extract_url(url: str) -> tuple[str, Optional[str], Optional[str]]:
     try:
         response = httpx.get(
             url, headers=_FETCH_HEADERS, timeout=_FETCH_TIMEOUT, follow_redirects=True
@@ -101,13 +115,14 @@ def extract(body: ExtractRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="provide exactly one of path or url")
 
     if body.url is not None:
-        markdown, title = extract_url(body.url)
-        return {"markdown": markdown, "title": title, "kind": "url"}
+        markdown, title, image_url = extract_url(body.url)
+        return {"markdown": markdown, "title": title, "kind": "url", "image_url": image_url}
 
     path = Path(body.path).expanduser()
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"no such file: {path}")
     ext = path.suffix.lower()
+    image_url: Optional[str] = None
     try:
         if ext == ".pdf":
             markdown, title = _extract_pdf(path)
@@ -116,7 +131,7 @@ def extract(body: ExtractRequest) -> dict[str, Any]:
             result = _markitdown.convert(str(path))
             markdown, title, kind = result.markdown, result.title or path.stem, "office"
         elif ext in _HTML_EXTS:
-            markdown, title = extract_html(path.read_text(errors="replace"))
+            markdown, title, image_url = extract_html(path.read_text(errors="replace"))
             title, kind = title or path.stem, "html"
         elif ext in _TEXT_EXTS:
             markdown = path.read_text(errors="replace")
@@ -138,4 +153,4 @@ def extract(body: ExtractRequest) -> dict[str, Any]:
         raise HTTPException(
             status_code=422, detail=f"no text extracted from {path.name} (scanned or empty?)"
         )
-    return {"markdown": markdown, "title": title, "kind": kind}
+    return {"markdown": markdown, "title": title, "kind": kind, "image_url": image_url}

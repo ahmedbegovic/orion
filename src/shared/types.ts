@@ -356,5 +356,8 @@ export interface NewsItem {
   summary: string | null
   status: NewsItemStatus
   readAt: number | null
+  /** RSS thumbnail at insert, og:image after extraction; https-gated renderer-side. */
+  imageUrl: string | null
+  archivedAt: number | null
   createdAt: number
 }

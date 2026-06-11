@@ -17,7 +17,29 @@ export function registerNewsFeature(news: NewsScheduler): void {
     return { ok: true }
   })
 
-  handle('news.items', (input) => ({ items: news.items(input?.limit), paused: news.paused() }))
+  handle('news.items', (input) => ({
+    items: news.items({
+      limit: input?.limit,
+      query: input?.query,
+      archived: input?.archived
+    }),
+    paused: news.paused()
+  }))
+
+  handle('news.archive', ({ id }) => {
+    news.archive(id)
+    return { ok: true }
+  })
+
+  handle('news.archiveAll', () => {
+    news.archiveAll()
+    return { ok: true }
+  })
+
+  handle('news.opened', () => {
+    news.ensureFresh()
+    return { ok: true }
+  })
 
   handle('news.read', ({ itemId }) => ({ markdown: news.read(itemId) }))
 

@@ -277,6 +277,37 @@ function ModelsSection({
   )
 }
 
+function NewsSection({
+  settings,
+  update
+}: {
+  settings: AppSettings
+  update: (patch: Partial<AppSettings>) => void
+}) {
+  return (
+    <Section
+      title="News"
+      hint="Topic filter applied when feeds are fetched — items matching none are skipped. Empty keeps everything."
+    >
+      <label className="flex flex-col gap-1.5 text-[11px] font-medium text-zinc-500">
+        Topics (comma-separated)
+        <CommitInput
+          value={settings.newsTopics.join(', ')}
+          placeholder="e.g. AI, formula 1, macOS"
+          onCommit={(text) =>
+            update({
+              newsTopics: text
+                .split(',')
+                .map((t) => t.trim())
+                .filter(Boolean)
+            })
+          }
+        />
+      </label>
+    </Section>
+  )
+}
+
 function AboutSection() {
   const version = useSystemStore((s) => s.status?.version)
   const dataDir = useSystemStore((s) => s.status?.dataDir)
@@ -312,6 +343,7 @@ export default function SettingsTab() {
           <InstructionsSection settings={settings} update={update} />
           <ModulesSection settings={settings} update={update} />
           <ModelsSection settings={settings} update={update} />
+          <NewsSection settings={settings} update={update} />
           <AboutSection />
         </div>
       ) : (

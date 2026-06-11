@@ -85,7 +85,7 @@ def search(body: SearchRequest) -> dict[str, Any]:
 
 @router.post("/visit")
 def visit(body: VisitRequest) -> dict[str, Any]:
-    markdown, title = extract_url(body.url)
+    markdown, title, image_url = extract_url(body.url)
     if len(markdown) > body.max_chars:
         markdown = markdown[: body.max_chars] + _TRUNCATION_MARKER
-    return {"markdown": markdown, "title": title, "url": body.url}
+    return {"markdown": markdown, "title": title, "url": body.url, "image_url": image_url}

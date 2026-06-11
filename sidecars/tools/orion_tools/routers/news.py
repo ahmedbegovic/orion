@@ -51,6 +51,28 @@ def _http_link(raw: Any) -> Optional[str]:
     return raw if split.scheme in ("http", "https") and split.netloc else None
 
 
+def _entry_image(entry: Any) -> Optional[str]:
+    """First usable thumbnail: media:thumbnail, image-typed media:content, enclosure."""
+    for item in entry.get("media_thumbnail") or []:
+        url = _http_link(item.get("url"))
+        if url:
+            return url
+    for item in entry.get("media_content") or []:
+        medium = item.get("medium")
+        mime = item.get("type") or ""
+        if medium not in (None, "image") and not mime.startswith("image/"):
+            continue
+        url = _http_link(item.get("url"))
+        if url:
+            return url
+    for link in entry.get("links") or []:
+        if link.get("rel") == "enclosure" and (link.get("type") or "").startswith("image/"):
+            url = _http_link(link.get("href"))
+            if url:
+                return url
+    return None
+
+
 @router.post("/news/fetch")
 def news_fetch(body: NewsFetchRequest) -> dict[str, Any]:
     headers = dict(_FETCH_HEADERS)
@@ -108,6 +130,7 @@ def news_fetch(body: NewsFetchRequest) -> dict[str, Any]:
                 "link": _http_link(entry.get("link")),
                 "published_ms": _published_ms(entry),
                 "summary": entry.get("summary") or None,
+                "image_url": _entry_image(entry),
             }
         )
 
